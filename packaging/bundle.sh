@@ -14,9 +14,23 @@ fi
 
 cargo packager "$@"
 
-plist="$repository_root/dist/NEO.app/Contents/Info.plist"
-if [ -f "$plist" ]; then
-    # cargo-packager 0.11.8 always adds this obsolete key.
-    # Remove the key so the app has no Carbon declaration.
-    plutil -remove LSRequiresCarbon "$plist"
+app="$repository_root/dist/NEO.app"
+if [ ! -d "$app" ]; then
+    echo "cargo-packager did not create $app" >&2
+    exit 1
+fi
+
+plist="$app/Contents/Info.plist"
+# cargo-packager 0.11.8 adds this obsolete key.
+plutil -remove LSRequiresCarbon "$plist"
+# Sign release bundles after this plist change.
+
+license="$app/Contents/Resources/Legal/AGPL-3.0-or-later.txt"
+if [ ! -f "$license" ]; then
+    echo "missing bundled license: $license" >&2
+    exit 1
+fi
+if ! cmp -s LICENSE "$license"; then
+    echo "bundled license differs from LICENSE: $license" >&2
+    exit 1
 fi
