@@ -1,0 +1,6 @@
+[env]
+MACOSX_DEPLOYMENT_TARGET = "26.1"
+
+# Cargo uses SSH authentication for the private libneo repository.
+[net]
+git-fetch-with-cli = true

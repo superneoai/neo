@@ -1,0 +1,28 @@
+[workspace]
+
+[package]
+name = "neo"
+description = "A macOS app built with GPUI and libneo"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+authors = ["ACTUAL LTD."]
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+libneo = { git = "ssh://git@github.com/superneoai/libneo.git", rev = "026ba00883b670a0b6d8303da413d727d01b98aa" }
+
+# GPUI links `ztracing`, which Zed publishes under `GPL-3.0-or-later`. The
+# libneo repository holds a permissive compatibility crate.
+# Zed tracks the license state in
+# https://github.com/zed-industries/zed/issues/55470.
+[patch."https://github.com/zed-industries/zed"]
+ztracing = { git = "ssh://git@github.com/superneoai/libneo.git", rev = "026ba00883b670a0b6d8303da413d727d01b98aa" }
+
+[patch."https://github.com/zed-industries/font-kit"]
+zed-font-kit = { version = "=0.14.1-zed" }
+
+[patch.crates-io]
+block = { git = "ssh://git@github.com/superneoai/libneo.git", rev = "026ba00883b670a0b6d8303da413d727d01b98aa" }
+
