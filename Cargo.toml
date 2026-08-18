@@ -26,3 +26,14 @@ zed-font-kit = { version = "=0.14.1-zed" }
 [patch.crates-io]
 block = { git = "ssh://git@github.com/superneoai/libneo.git", rev = "026ba00883b670a0b6d8303da413d727d01b98aa" }
 
+[package.metadata.packager]
+before-packaging-command = "cargo build"
+formats = ["app"]
+out-dir = "dist"
+product-name = "neo"
+description = "A macOS app built with GPUI and libneo"
+identifier = "com.superneo.neo"
+
+[package.metadata.packager.macos]
+minimum-system-version = "26.1"
+info-plist-path = "packaging/Info.plist"
