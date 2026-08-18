@@ -1,7 +1,9 @@
-# neo
+# NEO by SUPERNEO
 
-neo is a macOS app built with GPUI and libneo.
+NEO is the SUPERNEO macOS application, built with GPUI and libneo.
+
+## License
+
+NEO is licensed under [`AGPL-3.0-or-later`](LICENSE).
 
 Copyright (c) 2026 ACTUAL LTD.
-
-neo is licensed under `AGPL-3.0-or-later`. See [LICENSE](LICENSE).

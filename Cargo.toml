@@ -2,7 +2,7 @@
 
 [package]
 name = "neo"
-description = "A macOS app built with GPUI and libneo"
+description = "The SUPERNEO macOS application"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.97"
@@ -30,8 +30,8 @@ block = { git = "ssh://git@github.com/superneoai/libneo.git", rev = "026ba00883b
 before-packaging-command = "cargo build"
 formats = ["app"]
 out-dir = "dist"
-product-name = "neo"
-description = "A macOS app built with GPUI and libneo"
+product-name = "NEO"
+description = "The SUPERNEO macOS application"
 identifier = "com.superneo.neo"
 
 [package.metadata.packager.macos]

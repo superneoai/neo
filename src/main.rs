@@ -79,7 +79,7 @@ fn hsv_color(hue: f32, saturation: f32, value: f32) -> Rgba {
 fn main() {
     run(
         WindowBuilder::new()
-            .title("neo")
+            .title("NEO")
             .size(WINDOW_SIZE.0, WINDOW_SIZE.1)
             .minimum_size(MINIMUM_SIZE.0, MINIMUM_SIZE.1)
             .chrome(WindowChrome::Toolbar),

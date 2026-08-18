@@ -14,7 +14,7 @@ fi
 
 cargo packager "$@"
 
-plist="$repository_root/dist/neo.app/Contents/Info.plist"
+plist="$repository_root/dist/NEO.app/Contents/Info.plist"
 if [ -f "$plist" ]; then
     # cargo-packager 0.11.8 always adds this obsolete key.
     # Remove the key so the app has no Carbon declaration.

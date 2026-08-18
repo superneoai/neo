@@ -5,7 +5,7 @@
     <key>CFBundleIdentifier</key>
     <string>com.superneo.neo</string>
     <key>CFBundleName</key>
-    <string>neo</string>
+    <string>NEO</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.1</string>
     <!-- bundle.sh removes this cargo-packager key. -->
