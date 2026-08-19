@@ -1,6 +1,6 @@
-# NEO by SUPERNEO
+# NEO
 
-NEO is the SUPERNEO macOS application, built with GPUI and libneo.
+NEO is an application by SUPERNEO, currently developed for macOS with GPUI and libneo.
 
 ## License
 
