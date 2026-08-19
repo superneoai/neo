@@ -1,0 +1,40 @@
+# cargo-about collects the license texts NEO must ship with its binary.
+#
+# MIT, Apache-2.0 and the BSD family all require their notices to reach whoever
+# receives the compiled application, so `packaging/bundle.sh` generates these
+# notices and verifies that the bundle carries them. Keep the accepted list in
+# step with the allow list in `deny.toml`.
+
+accepted = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "bzip2-1.0.6",
+  "Unlicense",
+  "Zlib",
+]
+
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+]
+
+# NEO itself is AGPL-3.0-or-later and unpublished; its own license ships
+# separately as Legal/AGPL-3.0-or-later.txt.
+private = { ignore = true }
+
+workarounds = ["ring"]
+
+# The pinned GPUI revision publishes these crates without license metadata.
+# Zed licenses that revision under Apache-2.0.
+[gpui_shared_string.clarify]
+license = "Apache-2.0"
+
+[gpui_util.clarify]
+license = "Apache-2.0"
