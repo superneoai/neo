@@ -1,0 +1,60 @@
+# cargo-deny checks all dependency licenses, advisories, bans, and sources.
+# Run `cargo deny --locked check` before a release.
+
+[graph]
+targets = [
+  { triple = "aarch64-apple-darwin" },
+  { triple = "x86_64-apple-darwin" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# NEO itself is unpublished and AGPL, so the allow list below governs only its
+# dependencies rather than this workspace.
+private = { ignore = true }
+# NEO is AGPL-3.0-or-later, but its dependencies stay permissive so the bundled
+# third-party notices remain simple and no dependency imposes further copyleft.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "bzip2-1.0.6",
+  "Unlicense",
+  "Zlib",
+]
+
+[[licenses.clarify]]
+name = "gpui_shared_string"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+name = "gpui_util"
+expression = "Apache-2.0"
+license-files = []
+
+[bans]
+multiple-versions = "allow"
+
+[advisories]
+version = 2
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "paste is a transitive dependency of the pinned GPUI revision; no maintained release is available in this graph" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser is a transitive dependency of the pinned GPUI revision; the advisory has no safe upgrade" },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz is a transitive dependency of the pinned GPUI revision; the advisory has no safe upgrade" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+  "https://github.com/zed-industries/zed",
+  "https://github.com/superneoai/libneo",
+]
