@@ -34,6 +34,7 @@ formats = ["app"]
 out-dir = "dist"
 product-name = "NEO"
 description = "NEO for macOS"
+copyright = "Copyright © 2026 ACTUAL LTD."
 identifier = "com.superneo.neo"
 resources = [{ src = "LICENSE", target = "Legal/AGPL-3.0-or-later.txt" }]
 

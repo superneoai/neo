@@ -25,6 +25,13 @@ plist="$app/Contents/Info.plist"
 plutil -remove LSRequiresCarbon "$plist"
 # Sign release bundles after this plist change.
 
+expected_copyright="Copyright © 2026 ACTUAL LTD."
+actual_copyright=$(plutil -extract NSHumanReadableCopyright raw "$plist" 2>/dev/null || true)
+if [ "$actual_copyright" != "$expected_copyright" ]; then
+    echo "unexpected bundle copyright: $actual_copyright" >&2
+    exit 1
+fi
+
 license="$app/Contents/Resources/Legal/AGPL-3.0-or-later.txt"
 if [ ! -f "$license" ]; then
     echo "missing bundled license: $license" >&2
