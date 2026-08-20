@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+    # NEO pins libneo, ztracing and block to one reviewed commit. Dependabot must
+    # not move that pin.
+    ignore:
+      - dependency-name: libneo
+      - dependency-name: ztracing
+      - dependency-name: block
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
