@@ -108,10 +108,8 @@ impl ReleaseBuildEnvironment {
         }
         let path = std::env::join_paths(path)?;
 
-        let encoded_rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS");
-        let plain_rustflags = std::env::var_os("RUSTFLAGS");
-        let mut rustflags =
-            release_rustflags(encoded_rustflags.as_deref(), plain_rustflags.as_deref());
+        let mut rustflags = ambient_release_rustflags();
+        reject_profile_codegen_rustflags(&rustflags)?;
         for (path, replacement) in [
             (Path::new(&home), "/build"),
             (root, "/source"),
@@ -164,6 +162,12 @@ impl ReleaseBuildEnvironment {
     }
 }
 
+fn ambient_release_rustflags() -> Vec<OsString> {
+    let encoded = std::env::var_os("CARGO_ENCODED_RUSTFLAGS");
+    let plain = std::env::var_os("RUSTFLAGS");
+    release_rustflags(encoded.as_deref(), plain.as_deref())
+}
+
 fn release_rustflags(encoded: Option<&OsStr>, plain: Option<&OsStr>) -> Vec<OsString> {
     let (flags, separator) = match encoded {
         Some(flags) => (Some(flags), 0x1f),
@@ -175,6 +179,37 @@ fn release_rustflags(encoded: Option<&OsStr>, plain: Option<&OsStr>) -> Vec<OsSt
         .filter(|flag| !flag.is_empty())
         .map(|flag| OsStr::from_bytes(flag).to_os_string())
         .collect()
+}
+
+fn reject_profile_codegen_rustflags(rustflags: &[OsString]) -> Result<()> {
+    let mut rustflags = rustflags.iter();
+    while let Some(flag) = rustflags.next() {
+        let bytes = flag.as_bytes();
+        let option = if bytes == b"-C" {
+            rustflags.next().map(|option| option.as_bytes())
+        } else {
+            bytes
+                .strip_prefix(b"-C")
+                .map(|option| option.strip_prefix(b"=").unwrap_or(option))
+        };
+        let Some(option) = option else {
+            continue;
+        };
+        let name = option
+            .split(|byte| *byte == b'=')
+            .next()
+            .unwrap_or_default();
+        if matches!(
+            name,
+            b"opt-level" | b"debug-assertions" | b"overflow-checks"
+        ) {
+            return Err(failure(format!(
+                "release rustflags cannot set {}; remove this profile-owned codegen option",
+                String::from_utf8_lossy(name)
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct TargetContext {
@@ -211,9 +246,18 @@ fn reject_target_rustflags_for(
     cargo_home: &Path,
     target: &TargetContext,
 ) -> Result<()> {
-    let rustflags_environment = ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"]
-        .into_iter()
-        .find(|name| std::env::var_os(name).is_some());
+    let rustflags_environment = [
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+    ]
+    .into_iter()
+    .find(|name| std::env::var_os(name).is_some());
+    if rustflags_environment == Some("CARGO_BUILD_RUSTFLAGS") {
+        return Err(failure(
+            "CARGO_BUILD_RUSTFLAGS conflicts with release rustflags; pass supported flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
+        ));
+    }
     let target_environment = format!(
         "CARGO_TARGET_{}_RUSTFLAGS",
         target.triple.replace('-', "_").to_ascii_uppercase()
@@ -257,7 +301,7 @@ fn reject_target_rustflags_for(
                 path.display()
             ))
         })?;
-        reject_build_rustflags(&configuration, &path, rustflags_environment)?;
+        reject_build_rustflags(&configuration, &path)?;
         let Some(targets) = configuration.get("target").and_then(toml::Value::as_table) else {
             continue;
         };
@@ -286,21 +330,14 @@ fn reject_target_rustflags_for(
     Ok(())
 }
 
-fn reject_build_rustflags(
-    configuration: &toml::Value,
-    path: &Path,
-    environment: Option<&str>,
-) -> Result<()> {
-    let Some(environment) = environment else {
-        return Ok(());
-    };
+fn reject_build_rustflags(configuration: &toml::Value, path: &Path) -> Result<()> {
     let has_build_rustflags = configuration
         .get("build")
         .and_then(toml::Value::as_table)
         .is_some_and(|build| build.contains_key("rustflags"));
     if has_build_rustflags {
         return Err(failure(format!(
-            "build.rustflags in {} conflicts with {environment}; remove one of the overrides",
+            "build.rustflags in {} conflicts with release rustflags; pass supported flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
             path.display()
         )));
     }
@@ -352,13 +389,11 @@ fn reject_release_profile_keys(configuration: &toml::Value, path: &Path) -> Resu
     else {
         return Ok(());
     };
-    for key in ["opt-level", "debug-assertions", "overflow-checks"] {
-        if release.contains_key(key) {
-            return Err(failure(format!(
-                "profile.release.{key} in {} is unsupported for release packaging",
-                path.display()
-            )));
-        }
+    if let Some(key) = release.keys().next() {
+        return Err(failure(format!(
+            "profile.release.{key} in {} is unsupported for release packaging",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -565,9 +600,13 @@ fn release_executable_from_messages(messages: &[u8]) -> Result<PathBuf> {
             .pointer("/profile/debug_assertions")
             .and_then(serde_json::Value::as_bool)
             .ok_or_else(|| failure("neo compiler artifact has no profile.debug_assertions"))?;
-        if opt_level == "0" || debug_assertions {
+        let overflow_checks = message
+            .pointer("/profile/overflow_checks")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| failure("neo compiler artifact has no profile.overflow_checks"))?;
+        if opt_level != "3" || debug_assertions || overflow_checks {
             return Err(failure(format!(
-                "neo compiler artifact has forbidden release profile: opt_level={opt_level:?}, debug_assertions={debug_assertions}"
+                "neo compiler artifact has unexpected release profile: opt_level={opt_level:?}, debug_assertions={debug_assertions}, overflow_checks={overflow_checks}"
             )));
         }
         let executable = message
@@ -576,7 +615,7 @@ fn release_executable_from_messages(messages: &[u8]) -> Result<PathBuf> {
             .ok_or_else(|| failure("neo compiler artifact has no executable path"))?;
         artifact = Some(PathBuf::from(executable));
         println!(
-            "verified release compiler artifact profile: opt_level={opt_level:?}, debug_assertions={debug_assertions}; executable={executable}"
+            "verified release compiler artifact profile: opt_level={opt_level:?}, debug_assertions={debug_assertions}, overflow_checks={overflow_checks}; executable={executable}"
         );
     }
     artifact.ok_or_else(|| failure("Cargo emitted no compiler artifact for the neo bin target"))
@@ -1029,6 +1068,8 @@ fn verify_bundled_executable(
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&home).join(".cargo"));
+    reject_profile_codegen_rustflags(&ambient_release_rustflags())?;
+    reject_target_rustflags(root, &cargo_home)?;
     reject_release_profile_overrides(root, &cargo_home)?;
     let executable_name = dictionary
         .get("CFBundleExecutable")
@@ -1633,7 +1674,7 @@ mod tests {
         let messages = serde_json::json!({
             "reason": "compiler-artifact",
             "target": { "name": "neo", "kind": ["bin"] },
-            "profile": { "opt_level": "3", "debug_assertions": false },
+            "profile": { "opt_level": "3", "debug_assertions": false, "overflow_checks": false },
             "executable": "/target/release/neo"
         })
         .to_string();
@@ -1648,7 +1689,7 @@ mod tests {
         let messages = serde_json::json!({
             "reason": "compiler-artifact",
             "target": { "name": "neo", "kind": ["bin"] },
-            "profile": { "opt_level": "0", "debug_assertions": false },
+            "profile": { "opt_level": "0", "debug_assertions": false, "overflow_checks": false },
             "executable": "/target/release/neo"
         })
         .to_string();
@@ -1659,11 +1700,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unexpected_optimized_release_compiler_artifact_profile() {
+        let messages = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "neo", "kind": ["bin"] },
+            "profile": { "opt_level": "1", "debug_assertions": false, "overflow_checks": false },
+            "executable": "/target/release/neo"
+        })
+        .to_string();
+        let error = release_executable_from_messages(messages.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("opt_level=\"1\""));
+    }
+
+    #[test]
     fn rejects_debug_assertions_in_release_compiler_artifact_profile() {
         let messages = serde_json::json!({
             "reason": "compiler-artifact",
             "target": { "name": "neo", "kind": ["bin"] },
-            "profile": { "opt_level": "3", "debug_assertions": true },
+            "profile": { "opt_level": "3", "debug_assertions": true, "overflow_checks": false },
             "executable": "/target/release/neo"
         })
         .to_string();
@@ -1674,8 +1730,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overflow_checks_in_release_compiler_artifact_profile() {
+        let messages = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "neo", "kind": ["bin"] },
+            "profile": { "opt_level": "3", "debug_assertions": false, "overflow_checks": true },
+            "executable": "/target/release/neo"
+        })
+        .to_string();
+        let error = release_executable_from_messages(messages.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overflow_checks=true"));
+    }
+
+    #[test]
     fn rejects_release_profile_keys_in_root_manifest() {
-        for key in ["opt-level", "debug-assertions", "overflow-checks"] {
+        for key in ["opt-level", "debug-assertions", "overflow-checks", "lto"] {
             let fixture = Fixture::valid();
             let cargo_home = fixture.root.join("cargo-home");
             fs::write(
@@ -1689,6 +1760,21 @@ mod tests {
             assert!(error.contains(&format!("profile.release.{key}")));
             assert!(error.contains("Cargo.toml"));
         }
+    }
+
+    #[test]
+    fn rejects_package_release_profile_override() {
+        let fixture = Fixture::valid();
+        let cargo_home = fixture.root.join("cargo-home");
+        fs::write(
+            fixture.root.join("Cargo.toml"),
+            "[profile.release.package.neo]\nopt-level = 1\n",
+        )
+        .unwrap();
+        let error = reject_release_profile_overrides(&fixture.root, &cargo_home)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("profile.release.package"));
     }
 
     #[test]
@@ -1729,6 +1815,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_profile_codegen_rustflags() {
+        for option in ["opt-level=0", "debug-assertions=on", "overflow-checks=on"] {
+            for rustflags in [
+                vec![OsString::from("-C"), OsString::from(option)],
+                vec![OsString::from(format!("-C{option}"))],
+            ] {
+                let error = reject_profile_codegen_rustflags(&rustflags)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(option.split_once('=').unwrap().0));
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_non_profile_codegen_rustflags() {
+        let rustflags = ["-C", "target-cpu=native", "--cfg", "release_probe"].map(OsString::from);
+        reject_profile_codegen_rustflags(&rustflags).unwrap();
+    }
+
     fn test_target() -> TargetContext {
         TargetContext {
             triple: "aarch64-apple-darwin".into(),
@@ -1739,27 +1846,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_build_rustflags_with_environment_rustflags() {
+    fn rejects_build_rustflags() {
         let configuration = "[build]\nrustflags = [\"--cfg\", \"from_config\"]"
             .parse::<toml::Value>()
             .unwrap();
-        let error = reject_build_rustflags(
-            &configuration,
-            Path::new(".cargo/config.toml"),
-            Some("RUSTFLAGS"),
-        )
-        .unwrap_err()
-        .to_string();
+        let error = reject_build_rustflags(&configuration, Path::new(".cargo/config.toml"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("build.rustflags"));
-        assert!(error.contains("RUSTFLAGS"));
-    }
-
-    #[test]
-    fn accepts_build_rustflags_without_environment_rustflags() {
-        let configuration = "[build]\nrustflags = [\"--cfg\", \"from_config\"]"
-            .parse::<toml::Value>()
-            .unwrap();
-        reject_build_rustflags(&configuration, Path::new(".cargo/config.toml"), None).unwrap();
+        assert!(error.contains("release rustflags"));
     }
 
     #[test]
