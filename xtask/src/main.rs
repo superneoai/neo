@@ -247,7 +247,7 @@ fn package(profile: PackageProfile) -> Result<()> {
     }
 
     remove_carbon_key(&app.join("Contents/Info.plist"))?;
-    let attribution_count = verify_bundle(&root, &app)?;
+    let attribution_count = verify_bundle(&root, &app, matches!(profile, PackageProfile::Release))?;
     println!(
         "verified {} with {attribution_count} crate attributions",
         app.display()
@@ -262,7 +262,7 @@ fn sign() -> Result<()> {
     if !app.is_dir() {
         return Err(failure(format!("missing app bundle: {}", app.display())));
     }
-    let attribution_count = verify_bundle(&root, &app)?;
+    let attribution_count = verify_bundle(&root, &app, true)?;
     println!(
         "verified {} with {attribution_count} crate attributions",
         app.display()
@@ -475,7 +475,7 @@ fn notarize() -> Result<()> {
     if !app.is_dir() {
         return Err(failure(format!("missing app bundle: {}", app.display())));
     }
-    let attribution_count = verify_bundle(&root, &app)?;
+    let attribution_count = verify_bundle(&root, &app, true)?;
     println!(
         "verified {} with {attribution_count} crate attributions",
         app.display()
@@ -618,7 +618,7 @@ fn remove_carbon_key(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn verify_bundle(root: &Path, app: &Path) -> Result<usize> {
+fn verify_bundle(root: &Path, app: &Path, verify_executable: bool) -> Result<usize> {
     let plist_path = app.join("Contents/Info.plist");
     let plist = Value::from_file(&plist_path)?;
     let dictionary = plist.as_dictionary().ok_or_else(|| {
@@ -640,7 +640,9 @@ fn verify_bundle(root: &Path, app: &Path) -> Result<usize> {
             plist_path.display()
         )));
     }
-    verify_bundled_executable(app, dictionary)?;
+    if verify_executable {
+        verify_bundled_executable(app, dictionary)?;
+    }
 
     require_identical(
         &root.join("LICENSE"),
@@ -877,7 +879,11 @@ mod tests {
         }
 
         fn verify(&self) -> Result<usize> {
-            verify_bundle(&self.root, &self.app)
+            verify_bundle(&self.root, &self.app, true)
+        }
+
+        fn verify_debug(&self) -> Result<usize> {
+            verify_bundle(&self.root, &self.app, false)
         }
 
         fn executable(&self) -> PathBuf {
@@ -1034,6 +1040,17 @@ mod tests {
         .unwrap();
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("debug-assertion panic string"));
+    }
+
+    #[test]
+    fn permits_debug_executable_during_packaging() {
+        let fixture = Fixture::valid();
+        fs::write(
+            fixture.executable(),
+            b"debug executable attempt to add with overflow",
+        )
+        .unwrap();
+        assert_eq!(fixture.verify_debug().unwrap(), 1);
     }
 
     #[test]
