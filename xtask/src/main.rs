@@ -1,9 +1,10 @@
 use plist::Value;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Cursor};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -67,6 +68,97 @@ impl PackageProfile {
     }
 }
 
+struct ReleaseBuildEnvironment {
+    _directory: tempfile::TempDir,
+    cargo_home: PathBuf,
+    target: PathBuf,
+    rustflags: OsString,
+    private_prefix: OsString,
+}
+
+impl ReleaseBuildEnvironment {
+    fn new(root: &Path) -> Result<Self> {
+        let directory = tempfile::Builder::new().prefix("neo-release-").tempdir()?;
+        let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&home).join(".cargo"));
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("target"));
+        fs::create_dir_all(&target)?;
+        let cargo_home = fs::canonicalize(cargo_home)?;
+        let target = fs::canonicalize(target)?;
+        let cargo_home_alias = directory.path().join("cargo");
+        let target_alias = directory.path().join("target");
+        symlink(&cargo_home, &cargo_home_alias)?;
+        symlink(&target, &target_alias)?;
+
+        let mut rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+        for (path, replacement) in [
+            (Path::new(&home), "/build"),
+            (root, "/source"),
+            (&cargo_home, "/cargo"),
+            (&target, "/target"),
+        ] {
+            if !rustflags.is_empty() {
+                rustflags.push("\x1f");
+            }
+            rustflags.push("--remap-path-prefix=");
+            rustflags.push(path);
+            rustflags.push("=");
+            rustflags.push(replacement);
+        }
+
+        Ok(Self {
+            _directory: directory,
+            cargo_home: cargo_home_alias,
+            target: target_alias,
+            rustflags,
+            private_prefix: home,
+        })
+    }
+
+    fn apply(&self, command: &mut Command) {
+        command
+            .env("CARGO_HOME", &self.cargo_home)
+            .env("CARGO_TARGET_DIR", &self.target)
+            .env("CARGO_ENCODED_RUSTFLAGS", &self.rustflags);
+    }
+
+    fn scrub_binary(&self) -> Result<usize> {
+        scrub_private_prefix(
+            &self.target.join("release/neo"),
+            self.private_prefix.as_os_str(),
+        )
+    }
+}
+
+fn scrub_private_prefix(path: &Path, prefix: &OsStr) -> Result<usize> {
+    let prefix = prefix.as_bytes();
+    if prefix.is_empty() {
+        return Err(failure("private build path prefix is empty"));
+    }
+    let mut bytes = fs::read(path)?;
+    let mut replacement = vec![b'_'; prefix.len()];
+    replacement[0] = b'/';
+    let mut cursor = 0;
+    let mut count = 0;
+    while let Some(offset) = bytes[cursor..]
+        .windows(prefix.len())
+        .position(|window| window == prefix)
+    {
+        let start = cursor + offset;
+        bytes[start..start + prefix.len()].copy_from_slice(&replacement);
+        cursor = start + prefix.len();
+        count += 1;
+    }
+    if count > 0 {
+        fs::write(path, bytes)?;
+    }
+    Ok(count)
+}
+
 fn package(profile: PackageProfile) -> Result<()> {
     let root = repository_root();
     std::env::set_current_dir(&root)?;
@@ -74,13 +166,27 @@ fn package(profile: PackageProfile) -> Result<()> {
     require_tool_version("packager", PACKAGER_VERSION)?;
     require_tool_version("about", ABOUT_VERSION)?;
     generate_notices()?;
+    let build_environment = match profile {
+        PackageProfile::Release => Some(ReleaseBuildEnvironment::new(&root)?),
+        PackageProfile::Debug => None,
+    };
     let mut build = Command::new("cargo");
     build.args(["build", "--locked", "--package", "neo"]);
     profile.apply(&mut build);
+    if let Some(environment) = &build_environment {
+        environment.apply(&mut build);
+    }
     run_command(&mut build)?;
+    if let Some(environment) = &build_environment {
+        let scrubbed = environment.scrub_binary()?;
+        println!("scrubbed {scrubbed} private build path occurrences");
+    }
     let mut packager = Command::new("cargo");
     packager.args(["packager", "--packages", "neo"]);
     profile.apply(&mut packager);
+    if let Some(environment) = &build_environment {
+        environment.apply(&mut packager);
+    }
     run_command(&mut packager)?;
 
     let app = root.join(APP);
@@ -626,6 +732,25 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn scrubs_private_prefix_without_changing_binary_size() {
+        let fixture = Fixture::valid();
+        let binary = fixture.root.join("neo");
+        let bytes = b"before/Users/example/source/Users/example/after";
+        fs::write(&binary, bytes).unwrap();
+        assert_eq!(
+            scrub_private_prefix(&binary, OsStr::new("/Users/example")).unwrap(),
+            2
+        );
+        let scrubbed = fs::read(binary).unwrap();
+        assert_eq!(scrubbed.len(), bytes.len());
+        assert!(
+            !scrubbed
+                .windows(14)
+                .any(|window| window == b"/Users/example")
+        );
     }
 
     #[test]

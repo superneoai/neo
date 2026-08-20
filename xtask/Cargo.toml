@@ -6,4 +6,5 @@ publish = false
 
 [dependencies]
 plist = "1.10.0"
+tempfile = "3.27.0"
 toml = "0.8.23"
