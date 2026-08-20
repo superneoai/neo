@@ -690,7 +690,7 @@ fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Resu
         .filter(|name| Path::new(name).file_name() == Some(OsStr::new(name)))
         .ok_or_else(|| failure("bundle has no valid CFBundleExecutable"))?;
     let executable = app.join("Contents/MacOS").join(executable_name);
-    let bytes = fs::read(&executable).map_err(|error| {
+    let metadata = fs::metadata(&executable).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -699,6 +699,56 @@ fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Resu
             ),
         )
     })?;
+    if !metadata.is_file() {
+        return Err(failure(format!(
+            "bundled executable is not a regular file: {}",
+            executable.display()
+        )));
+    }
+    if metadata.len() == 0 {
+        return Err(failure(format!(
+            "bundled executable is empty: {}",
+            executable.display()
+        )));
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(failure(format!(
+            "bundled executable has no executable permission bits: {}",
+            executable.display()
+        )));
+    }
+    let bytes = fs::read(&executable).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot read bundled executable: {}: {error}",
+                executable.display()
+            ),
+        )
+    })?;
+    if !matches!(
+        bytes.get(..4),
+        Some(
+            [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+        )
+    ) {
+        return Err(failure(format!(
+            "bundled executable has no supported Mach-O magic: {}",
+            executable.display()
+        )));
+    }
+    if !bytes
+        .windows(b"/cargo/".len())
+        .any(|window| window == b"/cargo/")
+    {
+        return Err(failure(format!(
+            "bundled executable has no remapped /cargo/ provenance path: {}",
+            executable.display()
+        )));
+    }
     let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
     if home.is_empty() || home == "/" {
         return Err(failure("HOME is not a private path prefix"));
@@ -894,7 +944,15 @@ mod tests {
                 b"# Notices\n\n- [crate 1.0.0](url)\n",
             )
             .unwrap();
-            fs::write(app.join("Contents/MacOS/neo"), b"release executable").unwrap();
+            let executable = app.join("Contents/MacOS/neo");
+            fs::write(
+                &executable,
+                b"\xcf\xfa\xed\xfe/cargo/registry/release executable",
+            )
+            .unwrap();
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).unwrap();
             let mut dictionary = Dictionary::new();
             dictionary.insert("CFBundleExecutable".into(), "neo".into());
             dictionary.insert("NSHumanReadableCopyright".into(), EXPECTED_COPYRIGHT.into());
@@ -914,6 +972,12 @@ mod tests {
 
         fn executable(&self) -> PathBuf {
             self.app.join("Contents/MacOS/neo")
+        }
+
+        fn append_to_executable(&self, bytes: &[u8]) {
+            let mut executable = fs::read(self.executable()).unwrap();
+            executable.extend_from_slice(bytes);
+            fs::write(self.executable(), executable).unwrap();
         }
     }
 
@@ -1042,12 +1106,44 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_executable() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.executable(), b"").unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("bundled executable is empty"));
+    }
+
+    #[test]
+    fn rejects_nonexecutable_file() {
+        let fixture = Fixture::valid();
+        let mut permissions = fs::metadata(fixture.executable()).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(fixture.executable(), permissions).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("no executable permission bits"));
+    }
+
+    #[test]
+    fn rejects_non_mach_o_executable() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.executable(), b"#!/bin/sh\nexit 0\n").unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("no supported Mach-O magic"));
+    }
+
+    #[test]
+    fn rejects_executable_without_remapped_cargo_provenance() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.executable(), b"\xcf\xfa\xed\xferelease executable").unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("no remapped /cargo/ provenance path"));
+    }
+
+    #[test]
     fn rejects_private_home_path_in_executable() {
         let fixture = Fixture::valid();
         let home = std::env::var_os("HOME").unwrap();
-        let mut bytes = b"release executable ".to_vec();
-        bytes.extend_from_slice(home.as_bytes());
-        fs::write(fixture.executable(), bytes).unwrap();
+        fixture.append_to_executable(home.as_bytes());
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("private home path prefix"));
     }
@@ -1057,9 +1153,7 @@ mod tests {
         let fixture = Fixture::valid();
         let temporary_directory = std::env::temp_dir();
         let identifier = darwin_temp_identifier(&temporary_directory).unwrap();
-        let mut bytes = b"release executable ".to_vec();
-        bytes.extend_from_slice(identifier.as_bytes());
-        fs::write(fixture.executable(), bytes).unwrap();
+        fixture.append_to_executable(identifier.as_bytes());
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("Darwin temporary directory identifier"));
     }
@@ -1067,11 +1161,7 @@ mod tests {
     #[test]
     fn rejects_debug_assertion_panic_string_in_executable() {
         let fixture = Fixture::valid();
-        fs::write(
-            fixture.executable(),
-            b"release executable attempt to add with overflow",
-        )
-        .unwrap();
+        fixture.append_to_executable(b"attempt to add with overflow");
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("debug-assertion panic string"));
     }
