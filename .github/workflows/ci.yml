@@ -27,7 +27,6 @@ jobs:
         run: cargo fmt --all --check
       - name: Verify the pinned libneo source
         run: |
-          # NEO tracks libneo by commit, over https so no credential is required.
           grep -F 'https://github.com/superneoai/libneo.git' Cargo.toml
           if grep -q 'ssh://git@github.com' Cargo.toml Cargo.lock; then
             echo "NEO must fetch libneo over https" >&2

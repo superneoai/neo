@@ -20,7 +20,6 @@ if [ "$actual_about_version" != "cargo-about $required_about_version" ]; then
     exit 1
 fi
 
-# Regenerate the third-party notices so the bundle always matches this lockfile.
 # --fail stops the release when a dependency license cannot be determined.
 notices="packaging/generated/THIRD-PARTY-NOTICES.md"
 mkdir -p "$(dirname "$notices")"
@@ -70,7 +69,7 @@ if ! cmp -s "$notices" "$bundled_notices"; then
     echo "bundled notices differ from the generated notices: $bundled_notices" >&2
     exit 1
 fi
-# Reproduced license texts must stay verbatim, so reject HTML-escaped output.
+# Reproduced license texts must stay verbatim.
 if grep -q '&quot;\|&#x27;\|&amp;' "$bundled_notices"; then
     echo "bundled notices contain escaped entities: $bundled_notices" >&2
     exit 1
