@@ -20,6 +20,9 @@ cargo xtask sign
 cargo xtask notarize
 ```
 
+Packaging uses the release profile by default. For a faster local debug package,
+run `cargo xtask package --debug`.
+
 Signing uses the installed Developer ID Application identity or the
 `NEO_SIGNING_IDENTITY` override. Notarization uses the `SUPERNEO_NOTARY`
 Keychain profile.

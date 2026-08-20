@@ -36,22 +36,51 @@ fn main() {
 fn run() -> Result<()> {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
-    match (arguments.next().as_deref(), arguments.next()) {
-        (Some(command), None) if command == "package" => package(),
-        (Some(command), None) if command == "sign" => sign(),
-        (Some(command), None) if command == "notarize" => notarize(),
-        _ => Err(failure("usage: cargo xtask <package|sign|notarize>")),
+    match (
+        arguments.next().as_deref(),
+        arguments.next().as_deref(),
+        arguments.next(),
+    ) {
+        (Some(command), None, None) if command == "package" => package(PackageProfile::Release),
+        (Some(command), Some(option), None) if command == "package" && option == "--debug" => {
+            package(PackageProfile::Debug)
+        }
+        (Some(command), None, None) if command == "sign" => sign(),
+        (Some(command), None, None) if command == "notarize" => notarize(),
+        _ => Err(failure(
+            "usage: cargo xtask <package [--debug]|sign|notarize>",
+        )),
     }
 }
 
-fn package() -> Result<()> {
+#[derive(Clone, Copy)]
+enum PackageProfile {
+    Release,
+    Debug,
+}
+
+impl PackageProfile {
+    fn apply(self, command: &mut Command) {
+        if matches!(self, Self::Release) {
+            command.arg("--release");
+        }
+    }
+}
+
+fn package(profile: PackageProfile) -> Result<()> {
     let root = repository_root();
     std::env::set_current_dir(&root)?;
     require_tool_version("packager", PACKAGER_VERSION)?;
     require_tool_version("about", ABOUT_VERSION)?;
     generate_notices()?;
-    run_command(Command::new("cargo").args(["build", "--locked", "--package", "neo"]))?;
-    run_command(Command::new("cargo").args(["packager", "--packages", "neo"]))?;
+    let mut build = Command::new("cargo");
+    build.args(["build", "--locked", "--package", "neo"]);
+    profile.apply(&mut build);
+    run_command(&mut build)?;
+    let mut packager = Command::new("cargo");
+    packager.args(["packager", "--packages", "neo"]);
+    profile.apply(&mut packager);
+    run_command(&mut packager)?;
 
     let app = root.join(APP);
     if !app.is_dir() {
