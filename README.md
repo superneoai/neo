@@ -4,7 +4,7 @@ NEO is an application by SUPERNEO, currently developed for macOS with GPUI and l
 
 ## License
 
-NEO is licensed under [`AGPL-3.0-or-later`](LICENSE).
+NEO uses the [`AGPL-3.0-or-later`](LICENSE) licence.
 
 ## Contributing and security
 
