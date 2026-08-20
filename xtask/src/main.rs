@@ -258,12 +258,43 @@ exec /usr/bin/xcrun "$@"
 "#;
     fs::create_dir_all(directory)?;
     let path = directory.join("xcrun");
-    if !matches!(fs::read(&path), Ok(contents) if contents == WRAPPER.as_bytes()) {
-        fs::write(&path, WRAPPER)?;
+    let replace = match fs::read(&path) {
+        Ok(contents) => contents != WRAPPER.as_bytes(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot read xcrun wrapper {}: {error}", path.display()),
+            )
+            .into());
+        }
+    };
+    if replace {
+        fs::write(&path, WRAPPER).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot write xcrun wrapper {}: {error}", path.display()),
+            )
+        })?;
     }
-    let mut permissions = fs::metadata(&path)?.permissions();
+    let mut permissions = fs::metadata(&path)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot inspect xcrun wrapper {}: {error}", path.display()),
+            )
+        })?
+        .permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
+    fs::set_permissions(&path, permissions).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot make xcrun wrapper executable {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
     Ok(())
 }
 
@@ -840,13 +871,19 @@ fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Resu
         "Darwin temporary directory path",
         &executable,
     )?;
-    if let Some(identifier) = darwin_temp_identifier(&std::env::temp_dir()) {
+    let temporary_directory = std::env::temp_dir();
+    if let Some(identifier) = darwin_temp_identifier(&temporary_directory) {
         reject_executable_marker(
             &bytes,
             identifier.as_bytes(),
             "Darwin temporary directory identifier",
             &executable,
         )?;
+    } else {
+        eprintln!(
+            "warning: skipped the Darwin temporary directory identifier check because TMPDIR is outside /var/folders: {}",
+            temporary_directory.display()
+        );
     }
     for marker in [
         "attempt to add with overflow",
