@@ -150,7 +150,10 @@ fn signing_identity() -> Result<String> {
         if identity.trim().is_empty() {
             return Err(failure(format!("{SIGNING_IDENTITY_ENV} is empty")));
         }
-        println!("using signing identity from {SIGNING_IDENTITY_ENV}: {identity}");
+        println!(
+            "using signing identity from {SIGNING_IDENTITY_ENV}: {}",
+            signing_identity_label(&identity)
+        );
         return Ok(identity);
     }
 
@@ -160,8 +163,6 @@ fn signing_identity() -> Result<String> {
         "-p",
         "codesigning",
     ]))?;
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    eprint!("{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout)?;
     let identities = stdout
         .lines()
@@ -174,7 +175,10 @@ fn signing_identity() -> Result<String> {
         .collect::<Vec<_>>();
     match identities.as_slice() {
         [identity] => {
-            println!("selected signing identity: {identity}");
+            println!(
+                "selected signing identity: {}",
+                signing_identity_label(identity)
+            );
             Ok(identity.clone())
         }
         [] => Err(failure(format!(
@@ -184,6 +188,13 @@ fn signing_identity() -> Result<String> {
             "multiple Developer ID Application identities found; set {SIGNING_IDENTITY_ENV} to choose one"
         ))),
     }
+}
+
+fn signing_identity_label(identity: &str) -> &str {
+    identity
+        .strip_suffix(')')
+        .and_then(|identity| identity.rsplit_once(" (").map(|(label, _)| label))
+        .unwrap_or(identity)
 }
 
 fn nested_code(app: &Path) -> Result<Vec<PathBuf>> {
@@ -550,6 +561,18 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn redacts_team_id_from_signing_identity() {
+        assert_eq!(
+            signing_identity_label("Developer ID Application: Example Corporation (TEAMID1234)"),
+            "Developer ID Application: Example Corporation"
+        );
+        assert_eq!(
+            signing_identity_label("Developer ID Application: Example Corporation"),
+            "Developer ID Application: Example Corporation"
+        );
     }
 
     #[test]
