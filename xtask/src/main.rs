@@ -3,6 +3,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -12,6 +13,9 @@ const ABOUT_VERSION: &str = "cargo-about 0.8.2";
 const NOTICES: &str = "packaging/generated/THIRD-PARTY-NOTICES.md";
 const BUNDLED_NOTICES: &str = "Contents/Resources/Legal/THIRD-PARTY-NOTICES.md";
 const BUNDLED_LICENSE: &str = "Contents/Resources/Legal/AGPL-3.0-or-later.txt";
+const APP: &str = "dist/NEO.app";
+const ENTITLEMENTS: &str = "packaging/NEO.entitlements";
+const SIGNING_IDENTITY_ENV: &str = "NEO_SIGNING_IDENTITY";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -32,7 +36,8 @@ fn run() -> Result<()> {
     let _program = arguments.next();
     match (arguments.next().as_deref(), arguments.next()) {
         (Some(command), None) if command == "package" => package(),
-        _ => Err(failure("usage: cargo xtask package")),
+        (Some(command), None) if command == "sign" => sign(),
+        _ => Err(failure("usage: cargo xtask <package|sign>")),
     }
 }
 
@@ -44,7 +49,7 @@ fn package() -> Result<()> {
     generate_notices()?;
     run_command(Command::new("cargo").args(["packager", "--packages", "neo"]))?;
 
-    let app = root.join("dist/NEO.app");
+    let app = root.join(APP);
     if !app.is_dir() {
         return Err(failure(format!(
             "cargo-packager did not create {}",
@@ -59,6 +64,167 @@ fn package() -> Result<()> {
         app.display()
     );
     Ok(())
+}
+
+fn sign() -> Result<()> {
+    let root = repository_root();
+    std::env::set_current_dir(&root)?;
+    let app = root.join(APP);
+    if !app.is_dir() {
+        return Err(failure(format!("missing app bundle: {}", app.display())));
+    }
+    verify_bundle(&root, &app)?;
+    let identity = signing_identity()?;
+    let entitlements = root.join(ENTITLEMENTS);
+    if !entitlements.is_file() {
+        return Err(failure(format!(
+            "missing entitlements file: {}",
+            entitlements.display()
+        )));
+    }
+
+    let nested = nested_code(&app)?;
+    println!("found {} nested code items", nested.len());
+    for item in nested {
+        sign_item(&item, &identity, &entitlements)?;
+    }
+    sign_item(&app, &identity, &entitlements)?;
+    run_command(Command::new("codesign").args([
+        "--verify",
+        "--deep",
+        "--strict",
+        "--verbose=2",
+        app.as_os_str().to_str().expect("UTF-8 app path"),
+    ]))?;
+
+    let assessment = Command::new("spctl")
+        .args(["-a", "-vvv", "-t", "install"])
+        .arg(&app)
+        .status()?;
+    if assessment.success() {
+        println!("Gatekeeper accepted the signed app before notarization");
+    } else {
+        println!("Gatekeeper assessment remains pending notarization: {assessment}");
+    }
+    Ok(())
+}
+
+fn signing_identity() -> Result<String> {
+    if let Some(identity) = std::env::var_os(SIGNING_IDENTITY_ENV) {
+        let identity = identity
+            .into_string()
+            .map_err(|_| failure(format!("{SIGNING_IDENTITY_ENV} must contain valid Unicode")))?;
+        if identity.trim().is_empty() {
+            return Err(failure(format!("{SIGNING_IDENTITY_ENV} is empty")));
+        }
+        println!("using signing identity from {SIGNING_IDENTITY_ENV}: {identity}");
+        return Ok(identity);
+    }
+
+    let output = command_output(Command::new("security").args([
+        "find-identity",
+        "-v",
+        "-p",
+        "codesigning",
+    ]))?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout)?;
+    let identities = stdout
+        .lines()
+        .filter(|line| line.contains("\"Developer ID Application:"))
+        .filter_map(|line| {
+            let start = line.find('"')? + 1;
+            let end = line.rfind('"')?;
+            (end > start).then(|| line[start..end].to_owned())
+        })
+        .collect::<Vec<_>>();
+    match identities.as_slice() {
+        [identity] => {
+            println!("selected signing identity: {identity}");
+            Ok(identity.clone())
+        }
+        [] => Err(failure(format!(
+            "no Developer ID Application identity found; set {SIGNING_IDENTITY_ENV} to override"
+        ))),
+        _ => Err(failure(format!(
+            "multiple Developer ID Application identities found; set {SIGNING_IDENTITY_ENV} to choose one"
+        ))),
+    }
+}
+
+fn nested_code(app: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    collect_nested_code(app, app, &mut paths)?;
+    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    paths.dedup();
+    Ok(paths)
+}
+
+fn collect_nested_code(app: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_nested_code(app, &path, paths)?;
+            if path != app && is_code_bundle(&path) {
+                paths.push(path);
+            }
+        } else if file_type.is_file() && is_nested_executable(app, &path)? {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_code_bundle(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("app" | "appex" | "framework" | "plugin" | "xpc")
+    )
+}
+
+fn is_nested_executable(app: &Path, path: &Path) -> Result<bool> {
+    let relative = path.strip_prefix(app)?;
+    if relative.parent() == Some(Path::new("Contents/MacOS")) {
+        return Ok(false);
+    }
+    let extension = path.extension().and_then(OsStr::to_str);
+    if matches!(extension, Some("dylib" | "so")) {
+        return Ok(true);
+    }
+    let in_code_directory = [
+        "Contents/Frameworks",
+        "Contents/Helpers",
+        "Contents/Library/LoginItems",
+        "Contents/PlugIns",
+        "Contents/XPCServices",
+    ]
+    .iter()
+    .any(|directory| relative.starts_with(directory));
+    Ok(in_code_directory && fs::metadata(path)?.permissions().mode() & 0o111 != 0)
+}
+
+fn sign_item(path: &Path, identity: &str, entitlements: &Path) -> Result<()> {
+    println!("signing {}", path.display());
+    run_command(
+        Command::new("codesign")
+            .args([
+                "--force",
+                "--sign",
+                identity,
+                "--options",
+                "runtime",
+                "--timestamp",
+                "--entitlements",
+            ])
+            .arg(entitlements)
+            .arg(path),
+    )
 }
 
 fn repository_root() -> PathBuf {
