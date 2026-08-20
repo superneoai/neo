@@ -6555,7 +6555,6 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "plist",
- "tempfile",
  "toml 0.8.23",
 ]
 

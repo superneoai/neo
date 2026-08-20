@@ -69,16 +69,16 @@ impl PackageProfile {
 }
 
 struct ReleaseBuildEnvironment {
-    _directory: tempfile::TempDir,
     cargo_home: PathBuf,
+    cargo_home_alias: PathBuf,
     target: PathBuf,
-    rustflags: OsString,
-    private_prefix: OsString,
+    target_alias: PathBuf,
+    path: OsString,
+    rustflags_config: String,
 }
 
 impl ReleaseBuildEnvironment {
     fn new(root: &Path) -> Result<Self> {
-        let directory = tempfile::Builder::new().prefix("neo-release-").tempdir()?;
         let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
@@ -89,74 +89,127 @@ impl ReleaseBuildEnvironment {
         fs::create_dir_all(&target)?;
         let cargo_home = fs::canonicalize(cargo_home)?;
         let target = fs::canonicalize(target)?;
-        let cargo_home_alias = directory.path().join("cargo");
-        let target_alias = directory.path().join("target");
-        symlink(&cargo_home, &cargo_home_alias)?;
-        symlink(&target, &target_alias)?;
+        let alias_directory = root.join(".neo-release");
+        fs::create_dir_all(&alias_directory)?;
+        let cargo_home_alias = alias_directory.join("cargo");
+        let target_alias = alias_directory.join("target");
+        ensure_symlink(&cargo_home, &cargo_home_alias)?;
+        ensure_symlink(&target, &target_alias)?;
+        let wrapper_directory = alias_directory.join("bin");
+        prepare_xcrun_wrapper(&wrapper_directory)?;
+        let mut path = vec![wrapper_directory];
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.extend(std::env::split_paths(&existing));
+        }
+        let path = std::env::join_paths(path)?;
 
-        let mut rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+        let mut rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS")
+            .map(|flags| {
+                flags
+                    .as_bytes()
+                    .split(|byte| *byte == 0x1f)
+                    .filter(|flag| !flag.is_empty())
+                    .map(|flag| OsStr::from_bytes(flag).to_os_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for (path, replacement) in [
             (Path::new(&home), "/build"),
             (root, "/source"),
-            (&cargo_home, "/cargo"),
-            (&target, "/target"),
+            (&cargo_home_alias, "/cargo"),
+            (&target_alias, "/target"),
         ] {
-            if !rustflags.is_empty() {
-                rustflags.push("\x1f");
-            }
-            rustflags.push("--remap-path-prefix=");
-            rustflags.push(path);
-            rustflags.push("=");
-            rustflags.push(replacement);
+            let mut flag = OsString::from("--remap-path-prefix=");
+            flag.push(path);
+            flag.push("=");
+            flag.push(replacement);
+            rustflags.push(flag);
         }
+        let rustflags = rustflags
+            .into_iter()
+            .map(|flag| {
+                flag.into_string()
+                    .map(toml::Value::String)
+                    .map_err(|_| failure("release rustflags must contain valid Unicode"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let rustflags_config = format!("build.rustflags={}", toml::Value::Array(rustflags));
 
         Ok(Self {
-            _directory: directory,
-            cargo_home: cargo_home_alias,
-            target: target_alias,
-            rustflags,
-            private_prefix: home,
+            cargo_home,
+            cargo_home_alias,
+            target,
+            target_alias,
+            path,
+            rustflags_config,
         })
     }
 
     fn apply(&self, command: &mut Command) {
         command
-            .env("CARGO_HOME", &self.cargo_home)
-            .env("CARGO_TARGET_DIR", &self.target)
-            .env("CARGO_ENCODED_RUSTFLAGS", &self.rustflags);
-    }
-
-    fn scrub_binary(&self) -> Result<usize> {
-        scrub_private_prefix(
-            &self.target.join("release/neo"),
-            self.private_prefix.as_os_str(),
-        )
+            .args(["--config", &self.rustflags_config])
+            .env("CARGO_HOME", &self.cargo_home_alias)
+            .env("CARGO_TARGET_DIR", &self.target_alias)
+            .env("NEO_RELEASE_CARGO_HOME", &self.cargo_home)
+            .env("NEO_RELEASE_CARGO_ALIAS", &self.cargo_home_alias)
+            .env("NEO_RELEASE_TARGET", &self.target)
+            .env("NEO_RELEASE_TARGET_ALIAS", &self.target_alias)
+            .env("PATH", &self.path)
+            .env_remove("CARGO_ENCODED_RUSTFLAGS");
     }
 }
 
-fn scrub_private_prefix(path: &Path, prefix: &OsStr) -> Result<usize> {
-    let prefix = prefix.as_bytes();
-    if prefix.is_empty() {
-        return Err(failure("private build path prefix is empty"));
+fn prepare_xcrun_wrapper(directory: &Path) -> Result<()> {
+    const WRAPPER: &str = r#"#!/bin/sh
+if [ "$#" -ge 3 ] && [ "$1" = "-sdk" ] && [ "$3" = "metal" ]; then
+    exec /usr/bin/xcrun "$@" \
+        "-ffile-prefix-map=$NEO_RELEASE_CARGO_HOME=/cargo" \
+        "-fdebug-prefix-map=$NEO_RELEASE_CARGO_HOME=/cargo" \
+        "-ffile-prefix-map=$NEO_RELEASE_CARGO_ALIAS=/cargo" \
+        "-fdebug-prefix-map=$NEO_RELEASE_CARGO_ALIAS=/cargo" \
+        "-ffile-prefix-map=$NEO_RELEASE_TARGET=/target" \
+        "-fdebug-prefix-map=$NEO_RELEASE_TARGET=/target" \
+        "-ffile-prefix-map=$NEO_RELEASE_TARGET_ALIAS=/target" \
+        "-fdebug-prefix-map=$NEO_RELEASE_TARGET_ALIAS=/target"
+fi
+if [ "$#" -eq 6 ] && [ "$1" = "-sdk" ] && [ "$3" = "metallib" ] && [ "$5" = "-o" ] && [ "$(dirname "$4")" = "$(dirname "$6")" ]; then
+    directory=$(dirname "$6") || exit 1
+    input=$(basename "$4") || exit 1
+    output=$(basename "$6") || exit 1
+    cd "$directory" || exit 1
+    exec /usr/bin/xcrun -sdk "$2" metallib "$input" -o "$output"
+fi
+exec /usr/bin/xcrun "$@"
+"#;
+    fs::create_dir_all(directory)?;
+    let path = directory.join("xcrun");
+    if !matches!(fs::read(&path), Ok(contents) if contents == WRAPPER.as_bytes()) {
+        fs::write(&path, WRAPPER)?;
     }
-    let mut bytes = fs::read(path)?;
-    let mut replacement = vec![b'_'; prefix.len()];
-    replacement[0] = b'/';
-    let mut cursor = 0;
-    let mut count = 0;
-    while let Some(offset) = bytes[cursor..]
-        .windows(prefix.len())
-        .position(|window| window == prefix)
-    {
-        let start = cursor + offset;
-        bytes[start..start + prefix.len()].copy_from_slice(&replacement);
-        cursor = start + prefix.len();
-        count += 1;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+fn ensure_symlink(target: &Path, alias: &Path) -> Result<()> {
+    match fs::symlink_metadata(alias) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::read_link(alias)? != target {
+                fs::remove_file(alias)?;
+                symlink(target, alias)?;
+            }
+        }
+        Ok(_) => {
+            return Err(failure(format!(
+                "release build alias is not a symlink: {}",
+                alias.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => symlink(target, alias)?,
+        Err(error) => return Err(error.into()),
     }
-    if count > 0 {
-        fs::write(path, bytes)?;
-    }
-    Ok(count)
+    Ok(())
 }
 
 fn package(profile: PackageProfile) -> Result<()> {
@@ -171,22 +224,18 @@ fn package(profile: PackageProfile) -> Result<()> {
         PackageProfile::Debug => None,
     };
     let mut build = Command::new("cargo");
-    build.args(["build", "--locked", "--package", "neo"]);
-    profile.apply(&mut build);
     if let Some(environment) = &build_environment {
         environment.apply(&mut build);
     }
+    build.args(["build", "--locked", "--package", "neo"]);
+    profile.apply(&mut build);
     run_command(&mut build)?;
-    if let Some(environment) = &build_environment {
-        let scrubbed = environment.scrub_binary()?;
-        println!("scrubbed {scrubbed} private build path occurrences");
-    }
     let mut packager = Command::new("cargo");
-    packager.args(["packager", "--packages", "neo"]);
-    profile.apply(&mut packager);
     if let Some(environment) = &build_environment {
         environment.apply(&mut packager);
     }
+    packager.args(["packager", "--packages", "neo"]);
+    profile.apply(&mut packager);
     run_command(&mut packager)?;
 
     let app = root.join(APP);
@@ -401,7 +450,8 @@ fn is_nested_executable(app: &Path, path: &Path) -> Result<bool> {
 
 fn sign_item(path: &Path, identity: &str, entitlements: &Path) -> Result<()> {
     println!("signing {}", path.display());
-    run_command(
+    let label = signing_identity_label(identity);
+    run_command_redacted(
         Command::new("codesign")
             .args([
                 "--force",
@@ -414,6 +464,7 @@ fn sign_item(path: &Path, identity: &str, entitlements: &Path) -> Result<()> {
             ])
             .arg(entitlements)
             .arg(path),
+        &[(OsStr::new(identity), OsStr::new(label))],
     )
 }
 
@@ -589,6 +640,7 @@ fn verify_bundle(root: &Path, app: &Path) -> Result<usize> {
             plist_path.display()
         )));
     }
+    verify_bundled_executable(app, dictionary)?;
 
     require_identical(
         &root.join("LICENSE"),
@@ -629,6 +681,84 @@ fn verify_bundle(root: &Path, app: &Path) -> Result<usize> {
     Ok(attribution_count)
 }
 
+fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Result<()> {
+    let executable_name = dictionary
+        .get("CFBundleExecutable")
+        .and_then(Value::as_string)
+        .filter(|name| Path::new(name).file_name() == Some(OsStr::new(name)))
+        .ok_or_else(|| failure("bundle has no valid CFBundleExecutable"))?;
+    let executable = app.join("Contents/MacOS").join(executable_name);
+    let bytes = fs::read(&executable).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "missing bundled executable: {}: {error}",
+                executable.display()
+            ),
+        )
+    })?;
+    let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
+    if home.is_empty() || home == "/" {
+        return Err(failure("HOME is not a private path prefix"));
+    }
+    reject_executable_marker(
+        &bytes,
+        home.as_bytes(),
+        "private home path prefix",
+        &executable,
+    )?;
+    reject_executable_marker(
+        &bytes,
+        b"/var/folders",
+        "Darwin temporary directory path",
+        &executable,
+    )?;
+    if let Some(identifier) = darwin_temp_identifier(&std::env::temp_dir()) {
+        reject_executable_marker(
+            &bytes,
+            identifier.as_bytes(),
+            "Darwin temporary directory identifier",
+            &executable,
+        )?;
+    }
+    for marker in [
+        "attempt to add with overflow",
+        "attempt to subtract with overflow",
+        "attempt to multiply with overflow",
+        "attempt to divide with overflow",
+        "attempt to shift left with overflow",
+    ] {
+        reject_executable_marker(
+            &bytes,
+            marker.as_bytes(),
+            &format!("debug-assertion panic string {marker:?}"),
+            &executable,
+        )?;
+    }
+    Ok(())
+}
+
+fn darwin_temp_identifier(path: &Path) -> Option<&OsStr> {
+    path.starts_with("/var/folders")
+        .then(|| path.parent()?.file_name())
+        .flatten()
+}
+
+fn reject_executable_marker(
+    bytes: &[u8],
+    marker: &[u8],
+    description: &str,
+    executable: &Path,
+) -> Result<()> {
+    if !marker.is_empty() && bytes.windows(marker.len()).any(|window| window == marker) {
+        return Err(failure(format!(
+            "bundled executable contains {description}: {}",
+            executable.display()
+        )));
+    }
+    Ok(())
+}
+
 fn require_nonempty(path: &Path, description: &str) -> Result<()> {
     let metadata = fs::metadata(path).map_err(|error| {
         io::Error::new(
@@ -660,7 +790,11 @@ fn require_identical(expected: &Path, actual: &Path, message: &str) -> Result<()
 }
 
 fn run_command(command: &mut Command) -> Result<()> {
-    let display = display_command(command);
+    run_command_redacted(command, &[])
+}
+
+fn run_command_redacted(command: &mut Command, redactions: &[(&OsStr, &OsStr)]) -> Result<()> {
+    let display = display_command_redacted(command, redactions);
     let status = command.status()?;
     if !status.success() {
         return Err(failure(format!("{display} exited with {status}")));
@@ -682,9 +816,19 @@ fn command_output(command: &mut Command) -> Result<Output> {
 }
 
 fn display_command(command: &Command) -> String {
+    display_command_redacted(command, &[])
+}
+
+fn display_command_redacted(command: &Command, redactions: &[(&OsStr, &OsStr)]) -> String {
     std::iter::once(command.get_program())
         .chain(command.get_args())
-        .map(OsStr::to_string_lossy)
+        .map(|argument| {
+            redactions
+                .iter()
+                .find_map(|(secret, replacement)| (argument == *secret).then_some(*replacement))
+                .unwrap_or(argument)
+                .to_string_lossy()
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -712,6 +856,7 @@ mod tests {
             let root = std::env::temp_dir().join(format!("neo-xtask-{}-{id}", std::process::id()));
             let app = root.join("dist/NEO.app");
             fs::create_dir_all(app.join("Contents/Resources/Legal")).unwrap();
+            fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
             fs::create_dir_all(root.join("packaging/generated")).unwrap();
             fs::write(root.join("LICENSE"), b"license\n").unwrap();
             fs::write(app.join(BUNDLED_LICENSE), b"license\n").unwrap();
@@ -721,7 +866,9 @@ mod tests {
                 b"# Notices\n\n- [crate 1.0.0](url)\n",
             )
             .unwrap();
+            fs::write(app.join("Contents/MacOS/neo"), b"release executable").unwrap();
             let mut dictionary = Dictionary::new();
+            dictionary.insert("CFBundleExecutable".into(), "neo".into());
             dictionary.insert("NSHumanReadableCopyright".into(), EXPECTED_COPYRIGHT.into());
             Value::Dictionary(dictionary)
                 .to_file_xml(app.join("Contents/Info.plist"))
@@ -732,31 +879,16 @@ mod tests {
         fn verify(&self) -> Result<usize> {
             verify_bundle(&self.root, &self.app)
         }
+
+        fn executable(&self) -> PathBuf {
+            self.app.join("Contents/MacOS/neo")
+        }
     }
 
     impl Drop for Fixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
-    }
-
-    #[test]
-    fn scrubs_private_prefix_without_changing_binary_size() {
-        let fixture = Fixture::valid();
-        let binary = fixture.root.join("neo");
-        let bytes = b"before/Users/example/source/Users/example/after";
-        fs::write(&binary, bytes).unwrap();
-        assert_eq!(
-            scrub_private_prefix(&binary, OsStr::new("/Users/example")).unwrap(),
-            2
-        );
-        let scrubbed = fs::read(binary).unwrap();
-        assert_eq!(scrubbed.len(), bytes.len());
-        assert!(
-            !scrubbed
-                .windows(14)
-                .any(|window| window == b"/Users/example")
-        );
     }
 
     #[test]
@@ -795,6 +927,20 @@ mod tests {
             signing_identity_label("Developer ID Application: Example Corporation"),
             "Developer ID Application: Example Corporation"
         );
+    }
+
+    #[test]
+    fn redacts_team_id_from_command_failure() {
+        let identity = "Developer ID Application: Nonexistent Corp (ZZZZZZZZZZ)";
+        let label = signing_identity_label(identity);
+        let error = run_command_redacted(
+            Command::new("/usr/bin/false").arg(identity),
+            &[(OsStr::new(identity), OsStr::new(label))],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(label));
+        assert!(!error.contains("ZZZZZZZZZZ"));
     }
 
     #[test]
@@ -853,6 +999,41 @@ mod tests {
                 .unwrap()
                 .contains_key("LSRequiresCarbon")
         );
+    }
+
+    #[test]
+    fn rejects_private_home_path_in_executable() {
+        let fixture = Fixture::valid();
+        let home = std::env::var_os("HOME").unwrap();
+        let mut bytes = b"release executable ".to_vec();
+        bytes.extend_from_slice(home.as_bytes());
+        fs::write(fixture.executable(), bytes).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("private home path prefix"));
+    }
+
+    #[test]
+    fn rejects_darwin_temp_identifier_in_executable() {
+        let fixture = Fixture::valid();
+        let temporary_directory = std::env::temp_dir();
+        let identifier = darwin_temp_identifier(&temporary_directory).unwrap();
+        let mut bytes = b"release executable ".to_vec();
+        bytes.extend_from_slice(identifier.as_bytes());
+        fs::write(fixture.executable(), bytes).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("Darwin temporary directory identifier"));
+    }
+
+    #[test]
+    fn rejects_debug_assertion_panic_string_in_executable() {
+        let fixture = Fixture::valid();
+        fs::write(
+            fixture.executable(),
+            b"release executable attempt to add with overflow",
+        )
+        .unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("debug-assertion panic string"));
     }
 
     #[test]

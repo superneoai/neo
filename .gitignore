@@ -1,4 +1,5 @@
 /target/
+/.neo-release/
 /dist/
 .DS_Store
 /docs/
