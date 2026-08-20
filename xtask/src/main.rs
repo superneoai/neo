@@ -1,3 +1,4 @@
+use cargo_platform::{Cfg, Platform};
 use plist::Value;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -156,31 +157,60 @@ impl ReleaseBuildEnvironment {
 }
 
 fn release_rustflags(encoded: Option<&OsStr>, plain: Option<&OsStr>) -> Vec<OsString> {
-    let mut rustflags = encoded
+    let (flags, separator) = match encoded {
+        Some(flags) => (Some(flags), 0x1f),
+        None => (plain, b' '),
+    };
+    flags
         .into_iter()
-        .flat_map(|flags| flags.as_bytes().split(|byte| *byte == 0x1f))
+        .flat_map(|flags| flags.as_bytes().split(move |byte| *byte == separator))
         .filter(|flag| !flag.is_empty())
         .map(|flag| OsStr::from_bytes(flag).to_os_string())
-        .collect::<Vec<_>>();
-    rustflags.extend(
-        plain
-            .into_iter()
-            .flat_map(|flags| flags.as_bytes().split(|byte| byte.is_ascii_whitespace()))
-            .filter(|flag| !flag.is_empty())
-            .map(|flag| OsStr::from_bytes(flag).to_os_string()),
-    );
-    rustflags
+        .collect()
+}
+
+struct TargetContext {
+    triple: String,
+    cfg: Vec<Cfg>,
+}
+
+impl TargetContext {
+    fn host() -> Result<Self> {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let version = command_output(Command::new(&rustc).arg("-vV"))?;
+        let version = String::from_utf8(version.stdout)?;
+        let triple = version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .filter(|triple| !triple.is_empty())
+            .ok_or_else(|| failure("rustc -vV output has no host triple"))?
+            .to_owned();
+        let cfg = command_output(Command::new(&rustc).args(["--print", "cfg"]))?;
+        let cfg = String::from_utf8(cfg.stdout)?
+            .lines()
+            .map(str::parse)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Self { triple, cfg })
+    }
 }
 
 fn reject_target_rustflags(root: &Path, cargo_home: &Path) -> Result<()> {
-    for (name, _) in std::env::vars_os() {
-        let name = name.as_bytes();
-        if name.starts_with(b"CARGO_TARGET_") && name.ends_with(b"_RUSTFLAGS") {
-            return Err(failure(format!(
-                "target-specific rustflags environment variable {} overrides release path remapping; pass those flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
-                OsStr::from_bytes(name).to_string_lossy()
-            )));
-        }
+    reject_target_rustflags_for(root, cargo_home, &TargetContext::host()?)
+}
+
+fn reject_target_rustflags_for(
+    root: &Path,
+    cargo_home: &Path,
+    target: &TargetContext,
+) -> Result<()> {
+    let target_environment = format!(
+        "CARGO_TARGET_{}_RUSTFLAGS",
+        target.triple.replace('-', "_").to_ascii_uppercase()
+    );
+    if std::env::var_os(&target_environment).is_some() {
+        return Err(failure(format!(
+            "target-specific rustflags environment variable {target_environment} overrides release path remapping; pass those flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS"
+        )));
     }
 
     let mut paths = root
@@ -219,16 +249,26 @@ fn reject_target_rustflags(root: &Path, cargo_home: &Path) -> Result<()> {
         let Some(targets) = configuration.get("target").and_then(toml::Value::as_table) else {
             continue;
         };
-        if let Some(selector) = targets.iter().find_map(|(selector, settings)| {
-            settings
+        for (selector, settings) in targets {
+            if !settings
                 .as_table()
                 .is_some_and(|settings| settings.contains_key("rustflags"))
-                .then_some(selector)
-        }) {
-            return Err(failure(format!(
-                "target.{selector}.rustflags in {} overrides release path remapping; pass those flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
-                path.display()
-            )));
+            {
+                continue;
+            }
+            let platform = selector.parse::<Platform>().map_err(|error| {
+                failure(format!(
+                    "cannot evaluate target selector {selector:?} in {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let applies = platform.matches(&target.triple, &target.cfg);
+            if applies {
+                return Err(failure(format!(
+                    "target.{selector}.rustflags in {} overrides release path remapping; pass those flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
+                    path.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -1160,27 +1200,37 @@ mod tests {
     }
 
     #[test]
-    fn merges_plain_and_encoded_release_rustflags() {
+    fn encoded_release_rustflags_override_plain_rustflags() {
         let rustflags = release_rustflags(
             Some(OsStr::new("-C\u{1f}target-cpu=native")),
+            Some(OsStr::new("--cfg ignored")),
+        );
+        assert_eq!(rustflags, ["-C", "target-cpu=native"].map(OsString::from));
+    }
+
+    #[test]
+    fn plain_release_rustflags_split_only_on_spaces() {
+        let rustflags = release_rustflags(
+            None,
             Some(OsStr::new("  -C  debuginfo=0\t--cfg release_probe ")),
         );
         assert_eq!(
             rustflags,
-            [
-                "-C",
-                "target-cpu=native",
-                "-C",
-                "debuginfo=0",
-                "--cfg",
-                "release_probe"
-            ]
-            .map(OsString::from)
+            ["-C", "debuginfo=0\t--cfg", "release_probe"].map(OsString::from)
         );
     }
 
+    fn test_target() -> TargetContext {
+        TargetContext {
+            triple: "aarch64-apple-darwin".into(),
+            cfg: ["target_arch=\"aarch64\"", "target_os=\"macos\"", "unix"]
+                .map(|cfg| cfg.parse().unwrap())
+                .into(),
+        }
+    }
+
     #[test]
-    fn rejects_target_rustflags_in_cargo_configuration() {
+    fn rejects_host_target_rustflags_in_cargo_configuration() {
         let fixture = Fixture::valid();
         let cargo_home = fixture.root.join("cargo-home");
         fs::create_dir_all(fixture.root.join(".cargo")).unwrap();
@@ -1189,11 +1239,53 @@ mod tests {
             "[target.aarch64-apple-darwin]\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
         )
         .unwrap();
-        let error = reject_target_rustflags(&fixture.root, &cargo_home)
+        let error = reject_target_rustflags_for(&fixture.root, &cargo_home, &test_target())
             .unwrap_err()
             .to_string();
         assert!(error.contains("target.aarch64-apple-darwin.rustflags"));
         assert!(error.contains("overrides release path remapping"));
+    }
+
+    #[test]
+    fn accepts_non_host_target_rustflags_in_cargo_configuration() {
+        let fixture = Fixture::valid();
+        let cargo_home = fixture.root.join("cargo-home");
+        fs::create_dir_all(fixture.root.join(".cargo")).unwrap();
+        fs::write(
+            fixture.root.join(".cargo/config.toml"),
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-C\", \"linker=clang\"]\n",
+        )
+        .unwrap();
+        reject_target_rustflags_for(&fixture.root, &cargo_home, &test_target()).unwrap();
+    }
+
+    #[test]
+    fn rejects_matching_cfg_rustflags_in_cargo_configuration() {
+        let fixture = Fixture::valid();
+        let cargo_home = fixture.root.join("cargo-home");
+        fs::create_dir_all(fixture.root.join(".cargo")).unwrap();
+        fs::write(
+            fixture.root.join(".cargo/config.toml"),
+            "[target.'cfg(all(unix, target_os = \"macos\"))']\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
+        )
+        .unwrap();
+        let error = reject_target_rustflags_for(&fixture.root, &cargo_home, &test_target())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cfg(all(unix, target_os = \"macos\"))"));
+    }
+
+    #[test]
+    fn accepts_nonmatching_cfg_rustflags_in_cargo_configuration() {
+        let fixture = Fixture::valid();
+        let cargo_home = fixture.root.join("cargo-home");
+        fs::create_dir_all(fixture.root.join(".cargo")).unwrap();
+        fs::write(
+            fixture.root.join(".cargo/config.toml"),
+            "[target.'cfg(any(target_os = \"linux\", not(unix)))']\nrustflags = [\"-C\", \"linker=clang\"]\n",
+        )
+        .unwrap();
+        reject_target_rustflags_for(&fixture.root, &cargo_home, &test_target()).unwrap();
     }
 
     #[test]
