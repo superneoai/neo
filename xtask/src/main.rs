@@ -1180,6 +1180,7 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
         .ok_or_else(|| failure("truncated Mach-O load command area"))?;
     let mut offset = 32usize;
     let mut uuid = None;
+    let mut maximum_file_end = 0u64;
     for _ in 0..command_count {
         if offset.checked_add(8).is_none_or(|end| end > commands_end) {
             return Err(failure("truncated Mach-O load command header"));
@@ -1193,6 +1194,17 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
             .checked_add(size)
             .filter(|end| *end <= commands_end)
             .ok_or_else(|| failure("truncated Mach-O load command"))?;
+        if command == 0x19 {
+            if size < 72 {
+                return Err(failure("invalid LC_SEGMENT_64 load command size"));
+            }
+            let file_offset = read_macho_u64(bytes, offset + 40, &endian)?;
+            let file_size = read_macho_u64(bytes, offset + 48, &endian)?;
+            let file_end = file_offset
+                .checked_add(file_size)
+                .ok_or_else(|| failure("Mach-O segment file range overflows"))?;
+            maximum_file_end = maximum_file_end.max(file_end);
+        }
         if command == 0x1b {
             if size != 24 {
                 return Err(failure("invalid LC_UUID load command size"));
@@ -1211,6 +1223,9 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
     if offset != commands_end {
         return Err(failure("Mach-O load command sizes do not match header"));
     }
+    if maximum_file_end > bytes.len() as u64 {
+        return Err(failure("truncated Mach-O segment data"));
+    }
     let uuid = uuid.ok_or_else(|| failure("Mach-O has no LC_UUID load command"))?;
     Ok(MachOIdentity { cpu_type, uuid })
 }
@@ -1224,6 +1239,18 @@ fn read_macho_u32(bytes: &[u8], offset: usize, endian: &Endian) -> Result<u32> {
     Ok(match endian {
         Endian::Little => u32::from_le_bytes(value),
         Endian::Big => u32::from_be_bytes(value),
+    })
+}
+
+fn read_macho_u64(bytes: &[u8], offset: usize, endian: &Endian) -> Result<u64> {
+    let value: [u8; 8] = bytes
+        .get(offset..offset + 8)
+        .ok_or_else(|| failure("truncated Mach-O integer"))?
+        .try_into()
+        .expect("Mach-O integer size was checked");
+    Ok(match endian {
+        Endian::Little => u64::from_le_bytes(value),
+        Endian::Big => u64::from_be_bytes(value),
     })
 }
 
@@ -1407,6 +1434,34 @@ mod tests {
         bytes.extend_from_slice(&0x1bu32.to_le_bytes());
         bytes.extend_from_slice(&24u32.to_le_bytes());
         bytes.extend_from_slice(&uuid);
+        bytes
+    }
+
+    fn test_macho_with_segment(file_size: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
+        bytes.extend_from_slice(&0x0100_000cu32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&96u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0x19u32.to_le_bytes());
+        bytes.extend_from_slice(&72u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&file_size.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0x1bu32.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&TEST_UUID);
+        bytes.resize(file_size as usize, 0);
         bytes
     }
 
@@ -1801,6 +1856,15 @@ mod tests {
         .unwrap();
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("truncated Mach-O load command area"));
+    }
+
+    #[test]
+    fn rejects_truncated_mach_o_segment_data() {
+        let fixture = Fixture::valid();
+        let executable = test_macho_with_segment(256);
+        fs::write(fixture.executable(), &executable[..200]).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("truncated Mach-O segment data"));
     }
 
     #[test]
