@@ -249,7 +249,8 @@ fn sign() -> Result<()> {
     let assessment = Command::new("spctl")
         .args(["-a", "-vvv", "-t", "install"])
         .arg(&app)
-        .status()?;
+        .output()?
+        .status;
     if assessment.success() {
         println!("Gatekeeper accepted the signed app before notarization");
     } else {
@@ -481,11 +482,16 @@ fn notarize() -> Result<()> {
             .args(["stapler", "validate"])
             .arg(&app),
     )?;
-    run_command(
-        Command::new("spctl")
-            .args(["-a", "-vvv", "-t", "install"])
-            .arg(&app),
-    )?;
+    let assessment = Command::new("spctl")
+        .args(["-a", "-vvv", "-t", "install"])
+        .arg(&app)
+        .output()?;
+    if !assessment.status.success() {
+        return Err(failure(format!(
+            "Gatekeeper assessment exited with {}",
+            assessment.status
+        )));
+    }
     Ok(())
 }
 
