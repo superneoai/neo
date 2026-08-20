@@ -158,6 +158,7 @@ impl ReleaseBuildEnvironment {
             .env("NEO_RELEASE_TARGET", &self.target)
             .env("NEO_RELEASE_TARGET_ALIAS", &self.target_alias)
             .env("PATH", &self.path)
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
             .env_remove("CARGO_ENCODED_RUSTFLAGS")
             .env_remove("RUSTFLAGS");
     }
@@ -210,6 +211,9 @@ fn reject_target_rustflags_for(
     cargo_home: &Path,
     target: &TargetContext,
 ) -> Result<()> {
+    let rustflags_environment = ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"]
+        .into_iter()
+        .find(|name| std::env::var_os(name).is_some());
     let target_environment = format!(
         "CARGO_TARGET_{}_RUSTFLAGS",
         target.triple.replace('-', "_").to_ascii_uppercase()
@@ -253,6 +257,7 @@ fn reject_target_rustflags_for(
                 path.display()
             ))
         })?;
+        reject_build_rustflags(&configuration, &path, rustflags_environment)?;
         let Some(targets) = configuration.get("target").and_then(toml::Value::as_table) else {
             continue;
         };
@@ -277,6 +282,27 @@ fn reject_target_rustflags_for(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn reject_build_rustflags(
+    configuration: &toml::Value,
+    path: &Path,
+    environment: Option<&str>,
+) -> Result<()> {
+    let Some(environment) = environment else {
+        return Ok(());
+    };
+    let has_build_rustflags = configuration
+        .get("build")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|build| build.contains_key("rustflags"));
+    if has_build_rustflags {
+        return Err(failure(format!(
+            "build.rustflags in {} conflicts with {environment}; remove one of the overrides",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -1708,6 +1734,30 @@ mod tests {
                 .map(|cfg| cfg.parse().unwrap())
                 .into(),
         }
+    }
+
+    #[test]
+    fn rejects_build_rustflags_with_environment_rustflags() {
+        let configuration = "[build]\nrustflags = [\"--cfg\", \"from_config\"]"
+            .parse::<toml::Value>()
+            .unwrap();
+        let error = reject_build_rustflags(
+            &configuration,
+            Path::new(".cargo/config.toml"),
+            Some("RUSTFLAGS"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("build.rustflags"));
+        assert!(error.contains("RUSTFLAGS"));
+    }
+
+    #[test]
+    fn accepts_build_rustflags_without_environment_rustflags() {
+        let configuration = "[build]\nrustflags = [\"--cfg\", \"from_config\"]"
+            .parse::<toml::Value>()
+            .unwrap();
+        reject_build_rustflags(&configuration, Path::new(".cargo/config.toml"), None).unwrap();
     }
 
     #[test]
