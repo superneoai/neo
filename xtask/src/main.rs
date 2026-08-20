@@ -1148,15 +1148,12 @@ struct MachOIdentity {
     uuid: [u8; 16],
 }
 
-enum Endian {
-    Little,
-    Big,
-}
-
 fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
-    let endian = match bytes.get(..4) {
-        Some([0xcf, 0xfa, 0xed, 0xfe]) => Endian::Little,
-        Some([0xfe, 0xed, 0xfa, 0xcf]) => Endian::Big,
+    match bytes.get(..4) {
+        Some([0xcf, 0xfa, 0xed, 0xfe]) => {}
+        Some([0xfe, 0xed, 0xfa, 0xcf]) => {
+            return Err(failure("byte-swapped Mach-O is unsupported"));
+        }
         Some(
             [0xca, 0xfe, 0xba, 0xbe]
             | [0xbe, 0xba, 0xfe, 0xca]
@@ -1167,13 +1164,13 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
             return Err(failure("32-bit Mach-O is unsupported"));
         }
         _ => return Err(failure("no supported Mach-O magic")),
-    };
+    }
     if bytes.len() < 32 {
         return Err(failure("truncated Mach-O header"));
     }
-    let cpu_type = read_macho_u32(bytes, 4, &endian)?;
-    let command_count = read_macho_u32(bytes, 16, &endian)?;
-    let command_bytes = read_macho_u32(bytes, 20, &endian)? as usize;
+    let cpu_type = read_macho_u32(bytes, 4)?;
+    let command_count = read_macho_u32(bytes, 16)?;
+    let command_bytes = read_macho_u32(bytes, 20)? as usize;
     let commands_end = 32usize
         .checked_add(command_bytes)
         .filter(|end| *end <= bytes.len())
@@ -1185,8 +1182,8 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
         if offset.checked_add(8).is_none_or(|end| end > commands_end) {
             return Err(failure("truncated Mach-O load command header"));
         }
-        let command = read_macho_u32(bytes, offset, &endian)?;
-        let size = read_macho_u32(bytes, offset + 4, &endian)? as usize;
+        let command = read_macho_u32(bytes, offset)?;
+        let size = read_macho_u32(bytes, offset + 4)? as usize;
         if size < 8 {
             return Err(failure("invalid Mach-O load command size"));
         }
@@ -1198,8 +1195,8 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
             if size < 72 {
                 return Err(failure("invalid LC_SEGMENT_64 load command size"));
             }
-            let file_offset = read_macho_u64(bytes, offset + 40, &endian)?;
-            let file_size = read_macho_u64(bytes, offset + 48, &endian)?;
+            let file_offset = read_macho_u64(bytes, offset + 40)?;
+            let file_size = read_macho_u64(bytes, offset + 48)?;
             let file_end = file_offset
                 .checked_add(file_size)
                 .ok_or_else(|| failure("Mach-O segment file range overflows"))?;
@@ -1230,28 +1227,22 @@ fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
     Ok(MachOIdentity { cpu_type, uuid })
 }
 
-fn read_macho_u32(bytes: &[u8], offset: usize, endian: &Endian) -> Result<u32> {
+fn read_macho_u32(bytes: &[u8], offset: usize) -> Result<u32> {
     let value: [u8; 4] = bytes
         .get(offset..offset + 4)
         .ok_or_else(|| failure("truncated Mach-O integer"))?
         .try_into()
         .expect("Mach-O integer size was checked");
-    Ok(match endian {
-        Endian::Little => u32::from_le_bytes(value),
-        Endian::Big => u32::from_be_bytes(value),
-    })
+    Ok(u32::from_le_bytes(value))
 }
 
-fn read_macho_u64(bytes: &[u8], offset: usize, endian: &Endian) -> Result<u64> {
+fn read_macho_u64(bytes: &[u8], offset: usize) -> Result<u64> {
     let value: [u8; 8] = bytes
         .get(offset..offset + 8)
         .ok_or_else(|| failure("truncated Mach-O integer"))?
         .try_into()
         .expect("Mach-O integer size was checked");
-    Ok(match endian {
-        Endian::Little => u64::from_le_bytes(value),
-        Endian::Big => u64::from_be_bytes(value),
-    })
+    Ok(u64::from_le_bytes(value))
 }
 
 fn format_uuid(uuid: &[u8; 16]) -> String {
@@ -1433,6 +1424,22 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0x1bu32.to_le_bytes());
         bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&uuid);
+        bytes
+    }
+
+    fn test_byte_swapped_macho(cpu_type: u32, uuid: [u8; 16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xfeed_facfu32.to_be_bytes());
+        bytes.extend_from_slice(&cpu_type.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&24u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0x1bu32.to_be_bytes());
+        bytes.extend_from_slice(&24u32.to_be_bytes());
         bytes.extend_from_slice(&uuid);
         bytes
     }
@@ -1865,6 +1872,18 @@ mod tests {
         fs::write(fixture.executable(), &executable[..200]).unwrap();
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("truncated Mach-O segment data"));
+    }
+
+    #[test]
+    fn rejects_byte_swapped_mach_o_executable() {
+        let fixture = Fixture::valid();
+        fs::write(
+            fixture.executable(),
+            test_byte_swapped_macho(0x0100_000c, TEST_UUID),
+        )
+        .unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("byte-swapped Mach-O is unsupported"));
     }
 
     #[test]
