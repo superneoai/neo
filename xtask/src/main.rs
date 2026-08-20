@@ -83,6 +83,7 @@ impl ReleaseBuildEnvironment {
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&home).join(".cargo"));
+        reject_target_rustflags(root, &cargo_home)?;
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("target"));
@@ -103,16 +104,10 @@ impl ReleaseBuildEnvironment {
         }
         let path = std::env::join_paths(path)?;
 
-        let mut rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS")
-            .map(|flags| {
-                flags
-                    .as_bytes()
-                    .split(|byte| *byte == 0x1f)
-                    .filter(|flag| !flag.is_empty())
-                    .map(|flag| OsStr::from_bytes(flag).to_os_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let encoded_rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS");
+        let plain_rustflags = std::env::var_os("RUSTFLAGS");
+        let mut rustflags =
+            release_rustflags(encoded_rustflags.as_deref(), plain_rustflags.as_deref());
         for (path, replacement) in [
             (Path::new(&home), "/build"),
             (root, "/source"),
@@ -155,8 +150,88 @@ impl ReleaseBuildEnvironment {
             .env("NEO_RELEASE_TARGET", &self.target)
             .env("NEO_RELEASE_TARGET_ALIAS", &self.target_alias)
             .env("PATH", &self.path)
-            .env_remove("CARGO_ENCODED_RUSTFLAGS");
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTFLAGS");
     }
+}
+
+fn release_rustflags(encoded: Option<&OsStr>, plain: Option<&OsStr>) -> Vec<OsString> {
+    let mut rustflags = encoded
+        .into_iter()
+        .flat_map(|flags| flags.as_bytes().split(|byte| *byte == 0x1f))
+        .filter(|flag| !flag.is_empty())
+        .map(|flag| OsStr::from_bytes(flag).to_os_string())
+        .collect::<Vec<_>>();
+    rustflags.extend(
+        plain
+            .into_iter()
+            .flat_map(|flags| flags.as_bytes().split(|byte| byte.is_ascii_whitespace()))
+            .filter(|flag| !flag.is_empty())
+            .map(|flag| OsStr::from_bytes(flag).to_os_string()),
+    );
+    rustflags
+}
+
+fn reject_target_rustflags(root: &Path, cargo_home: &Path) -> Result<()> {
+    for (name, _) in std::env::vars_os() {
+        let name = name.as_bytes();
+        if name.starts_with(b"CARGO_TARGET_") && name.ends_with(b"_RUSTFLAGS") {
+            return Err(failure(format!(
+                "target-specific rustflags environment variable {} overrides release path remapping; pass those flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
+                OsStr::from_bytes(name).to_string_lossy()
+            )));
+        }
+    }
+
+    let mut paths = root
+        .ancestors()
+        .flat_map(|directory| {
+            [
+                directory.join(".cargo/config.toml"),
+                directory.join(".cargo/config"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    paths.extend([cargo_home.join("config.toml"), cargo_home.join("config")]);
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot read Cargo configuration {}: {error}",
+                        path.display()
+                    ),
+                )
+                .into());
+            }
+        };
+        let configuration = contents.parse::<toml::Value>().map_err(|error| {
+            failure(format!(
+                "cannot parse Cargo configuration {}: {error}",
+                path.display()
+            ))
+        })?;
+        let Some(targets) = configuration.get("target").and_then(toml::Value::as_table) else {
+            continue;
+        };
+        if let Some(selector) = targets.iter().find_map(|(selector, settings)| {
+            settings
+                .as_table()
+                .is_some_and(|settings| settings.contains_key("rustflags"))
+                .then_some(selector)
+        }) {
+            return Err(failure(format!(
+                "target.{selector}.rustflags in {} overrides release path remapping; pass those flags through RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_xcrun_wrapper(directory: &Path) -> Result<()> {
@@ -1045,6 +1120,43 @@ mod tests {
         let label = OsStr::new("Developer ID Application: Nonexistent Corp");
         let output = redact_bytes(identity.as_bytes(), &[(identity, label)]);
         assert_eq!(output, label.as_bytes());
+    }
+
+    #[test]
+    fn merges_plain_and_encoded_release_rustflags() {
+        let rustflags = release_rustflags(
+            Some(OsStr::new("-C\u{1f}target-cpu=native")),
+            Some(OsStr::new("  -C  debuginfo=0\t--cfg release_probe ")),
+        );
+        assert_eq!(
+            rustflags,
+            [
+                "-C",
+                "target-cpu=native",
+                "-C",
+                "debuginfo=0",
+                "--cfg",
+                "release_probe"
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn rejects_target_rustflags_in_cargo_configuration() {
+        let fixture = Fixture::valid();
+        let cargo_home = fixture.root.join("cargo-home");
+        fs::create_dir_all(fixture.root.join(".cargo")).unwrap();
+        fs::write(
+            fixture.root.join(".cargo/config.toml"),
+            "[target.aarch64-apple-darwin]\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
+        )
+        .unwrap();
+        let error = reject_target_rustflags(&fixture.root, &cargo_home)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("target.aarch64-apple-darwin.rustflags"));
+        assert!(error.contains("overrides release path remapping"));
     }
 
     #[test]
