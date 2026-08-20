@@ -126,13 +126,11 @@ fn sign() -> Result<()> {
         sign_item(&item, &identity, &entitlements)?;
     }
     sign_item(&app, &identity, &entitlements)?;
-    run_command(Command::new("codesign").args([
-        "--verify",
-        "--deep",
-        "--strict",
-        "--verbose=2",
-        app.as_os_str().to_str().expect("UTF-8 app path"),
-    ]))?;
+    run_command(
+        Command::new("codesign")
+            .args(["--verify", "--deep", "--strict", "--verbose=2"])
+            .arg(&app),
+    )?;
     let signature = command_output(Command::new("codesign").arg("-dvvv").arg(&app))?;
     let signature_details = format!(
         "{}{}",
@@ -324,13 +322,11 @@ fn notarize() -> Result<()> {
         "verified {} with {attribution_count} crate attributions",
         app.display()
     );
-    run_command(Command::new("codesign").args([
-        "--verify",
-        "--deep",
-        "--strict",
-        "--verbose=2",
-        app.as_os_str().to_str().expect("UTF-8 app path"),
-    ]))?;
+    run_command(
+        Command::new("codesign")
+            .args(["--verify", "--deep", "--strict", "--verbose=2"])
+            .arg(&app),
+    )?;
 
     let archive = root.join(NOTARY_ARCHIVE);
     if archive.exists() {
@@ -344,10 +340,9 @@ fn notarize() -> Result<()> {
     )?;
 
     let output = Command::new("xcrun")
+        .args(["notarytool", "submit"])
+        .arg(&archive)
         .args([
-            "notarytool",
-            "submit",
-            archive.as_os_str().to_str().expect("UTF-8 archive path"),
             "--keychain-profile",
             NOTARY_PROFILE,
             "--wait",
