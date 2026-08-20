@@ -50,6 +50,7 @@ fn package() -> Result<()> {
     require_tool_version("packager", PACKAGER_VERSION)?;
     require_tool_version("about", ABOUT_VERSION)?;
     generate_notices()?;
+    run_command(Command::new("cargo").args(["build", "--locked", "--package", "neo"]))?;
     run_command(Command::new("cargo").args(["packager", "--packages", "neo"]))?;
 
     let app = root.join(APP);

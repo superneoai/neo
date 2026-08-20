@@ -8,8 +8,5 @@
     <string>NEO</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.1</string>
-    <!-- bundle.sh removes this cargo-packager key. -->
-    <key>LSRequiresCarbon</key>
-    <false/>
 </dict>
 </plist>

@@ -9,6 +9,21 @@ NEO uses the [`AGPL-3.0-or-later`](LICENSE) licence.
 This repository holds the Corresponding Source for every NEO build:
 <https://github.com/superneoai/neo>.
 
+## Release
+
+Install `cargo-packager` 0.11.8 and `cargo-about` 0.8.2, then run the release
+stages independently:
+
+```sh
+cargo xtask package
+cargo xtask sign
+cargo xtask notarize
+```
+
+Signing uses the installed Developer ID Application identity or the
+`NEO_SIGNING_IDENTITY` override. Notarization uses the `SUPERNEO_NOTARY`
+Keychain profile.
+
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
