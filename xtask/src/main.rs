@@ -70,6 +70,7 @@ impl PackageProfile {
 fn package(profile: PackageProfile) -> Result<()> {
     let root = repository_root();
     std::env::set_current_dir(&root)?;
+    reject_packager_signing_identity(&root)?;
     require_tool_version("packager", PACKAGER_VERSION)?;
     require_tool_version("about", ABOUT_VERSION)?;
     generate_notices()?;
@@ -397,6 +398,24 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn reject_packager_signing_identity(root: &Path) -> Result<()> {
+    let manifest_path = root.join("Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.parse::<toml::Value>()?;
+    let signing_identity = manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("packager"))
+        .and_then(|packager| packager.get("macos"))
+        .and_then(|macos| macos.get("signing-identity"));
+    if signing_identity.is_some() {
+        return Err(failure(format!(
+            "remove package.metadata.packager.macos.signing-identity from {}",
+            manifest_path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn require_tool_version(subcommand: &str, expected: &str) -> Result<()> {
     let output = command_output(Command::new("cargo").args([subcommand, "--version"]))?;
     let actual = String::from_utf8(output.stdout)?.trim().to_owned();
@@ -645,6 +664,28 @@ mod tests {
             signing_identity_label("Developer ID Application: Example Corporation"),
             "Developer ID Application: Example Corporation"
         );
+    }
+
+    #[test]
+    fn rejects_packager_signing_identity() {
+        let fixture = Fixture::valid();
+        fs::write(
+            fixture.root.join("Cargo.toml"),
+            "[package.metadata.packager.macos]\nsigning-identity = \"Developer ID Application: Example Corporation\"\n",
+        )
+        .unwrap();
+        assert!(reject_packager_signing_identity(&fixture.root).is_err());
+    }
+
+    #[test]
+    fn accepts_packager_metadata_without_signing_identity() {
+        let fixture = Fixture::valid();
+        fs::write(
+            fixture.root.join("Cargo.toml"),
+            "[package.metadata.packager.macos]\nminimum-system-version = \"26.1\"\n",
+        )
+        .unwrap();
+        assert!(reject_packager_signing_identity(&fixture.root).is_ok());
     }
 
     #[test]
