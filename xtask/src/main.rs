@@ -2,7 +2,7 @@ use plist::Value;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -797,11 +797,37 @@ fn run_command(command: &mut Command) -> Result<()> {
 
 fn run_command_redacted(command: &mut Command, redactions: &[(&OsStr, &OsStr)]) -> Result<()> {
     let display = display_command_redacted(command, redactions);
-    let status = command.status()?;
-    if !status.success() {
-        return Err(failure(format!("{display} exited with {status}")));
+    let output = command.output()?;
+    io::stdout().write_all(&redact_bytes(&output.stdout, redactions))?;
+    io::stderr().write_all(&redact_bytes(&output.stderr, redactions))?;
+    if !output.status.success() {
+        return Err(failure(format!("{display} exited with {}", output.status)));
     }
     Ok(())
+}
+
+fn redact_bytes(bytes: &[u8], redactions: &[(&OsStr, &OsStr)]) -> Vec<u8> {
+    let mut result = bytes.to_vec();
+    for (secret, replacement) in redactions {
+        let secret = secret.as_bytes();
+        if secret.is_empty() {
+            continue;
+        }
+        let replacement = replacement.as_bytes();
+        let mut redacted = Vec::with_capacity(result.len());
+        let mut remainder = result.as_slice();
+        while let Some(offset) = remainder
+            .windows(secret.len())
+            .position(|window| window == secret)
+        {
+            redacted.extend_from_slice(&remainder[..offset]);
+            redacted.extend_from_slice(replacement);
+            remainder = &remainder[offset + secret.len()..];
+        }
+        redacted.extend_from_slice(remainder);
+        result = redacted;
+    }
+    result
 }
 
 fn command_output(command: &mut Command) -> Result<Output> {
@@ -947,6 +973,14 @@ mod tests {
         .to_string();
         assert!(error.contains(label));
         assert!(!error.contains("ZZZZZZZZZZ"));
+    }
+
+    #[test]
+    fn redacts_team_id_from_command_output() {
+        let identity = OsStr::new("Developer ID Application: Nonexistent Corp (ZZZZZZZZZZ)");
+        let label = OsStr::new("Developer ID Application: Nonexistent Corp");
+        let output = redact_bytes(identity.as_bytes(), &[(identity, label)]);
+        assert_eq!(output, label.as_bytes());
     }
 
     #[test]
