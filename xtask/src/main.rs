@@ -2,7 +2,7 @@ use plist::Value;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Cursor};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -16,6 +16,8 @@ const BUNDLED_LICENSE: &str = "Contents/Resources/Legal/AGPL-3.0-or-later.txt";
 const APP: &str = "dist/NEO.app";
 const ENTITLEMENTS: &str = "packaging/NEO.entitlements";
 const SIGNING_IDENTITY_ENV: &str = "NEO_SIGNING_IDENTITY";
+const NOTARY_PROFILE: &str = "SUPERNEO_NOTARY";
+const NOTARY_ARCHIVE: &str = "dist/NEO.zip";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -37,7 +39,8 @@ fn run() -> Result<()> {
     match (arguments.next().as_deref(), arguments.next()) {
         (Some(command), None) if command == "package" => package(),
         (Some(command), None) if command == "sign" => sign(),
-        _ => Err(failure("usage: cargo xtask <package|sign>")),
+        (Some(command), None) if command == "notarize" => notarize(),
+        _ => Err(failure("usage: cargo xtask <package|sign|notarize>")),
     }
 }
 
@@ -225,6 +228,86 @@ fn sign_item(path: &Path, identity: &str, entitlements: &Path) -> Result<()> {
             .arg(entitlements)
             .arg(path),
     )
+}
+
+fn notarize() -> Result<()> {
+    let root = repository_root();
+    std::env::set_current_dir(&root)?;
+    let app = root.join(APP);
+    if !app.is_dir() {
+        return Err(failure(format!("missing app bundle: {}", app.display())));
+    }
+    verify_bundle(&root, &app)?;
+    run_command(Command::new("codesign").args([
+        "--verify",
+        "--deep",
+        "--strict",
+        "--verbose=2",
+        app.as_os_str().to_str().expect("UTF-8 app path"),
+    ]))?;
+
+    let archive = root.join(NOTARY_ARCHIVE);
+    if archive.exists() {
+        fs::remove_file(&archive)?;
+    }
+    run_command(
+        Command::new("ditto")
+            .args(["-c", "-k", "--keepParent"])
+            .arg(&app)
+            .arg(&archive),
+    )?;
+
+    let output = Command::new("xcrun")
+        .args([
+            "notarytool",
+            "submit",
+            archive.as_os_str().to_str().expect("UTF-8 archive path"),
+            "--keychain-profile",
+            NOTARY_PROFILE,
+            "--wait",
+            "--output-format",
+            "plist",
+        ])
+        .output()?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    let submission = Value::from_reader(Cursor::new(&output.stdout))?;
+    let submission_id = submission_field(&submission, "id")?;
+    let status = submission_field(&submission, "status")?;
+    println!("notarization submission {submission_id}: {status}");
+    if !output.status.success() || status != "Accepted" {
+        let _ = run_command(Command::new("xcrun").args([
+            "notarytool",
+            "log",
+            submission_id,
+            "--keychain-profile",
+            NOTARY_PROFILE,
+        ]));
+        return Err(failure(format!(
+            "notarization submission {submission_id} finished with {status}"
+        )));
+    }
+
+    run_command(Command::new("xcrun").args(["stapler", "staple"]).arg(&app))?;
+    run_command(
+        Command::new("xcrun")
+            .args(["stapler", "validate"])
+            .arg(&app),
+    )?;
+    run_command(
+        Command::new("spctl")
+            .args(["-a", "-vvv", "-t", "install"])
+            .arg(&app),
+    )?;
+    Ok(())
+}
+
+fn submission_field<'a>(submission: &'a Value, field: &str) -> Result<&'a str> {
+    submission
+        .as_dictionary()
+        .and_then(|dictionary| dictionary.get(field))
+        .and_then(Value::as_string)
+        .ok_or_else(|| failure(format!("notarytool response has no string {field} field")))
 }
 
 fn repository_root() -> PathBuf {
@@ -437,6 +520,19 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn reads_notary_submission_fields() {
+        let mut dictionary = Dictionary::new();
+        dictionary.insert("id".into(), "submission-id".into());
+        dictionary.insert("status".into(), "Accepted".into());
+        let submission = Value::Dictionary(dictionary);
+        assert_eq!(
+            submission_field(&submission, "id").unwrap(),
+            "submission-id"
+        );
+        assert_eq!(submission_field(&submission, "status").unwrap(), "Accepted");
     }
 
     #[test]
