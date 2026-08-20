@@ -240,7 +240,6 @@ fn nested_code(app: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     collect_nested_code(app, app, &mut paths)?;
     paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    paths.dedup();
     Ok(paths)
 }
 
