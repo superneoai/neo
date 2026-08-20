@@ -7,7 +7,7 @@ use std::io::{self, Cursor, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const EXPECTED_COPYRIGHT: &str = "Copyright © 2026 ACTUAL LTD.";
 const PACKAGER_VERSION: &str = "cargo-packager 0.11.8";
@@ -562,10 +562,12 @@ fn run_release_build(environment: &ReleaseBuildEnvironment) -> Result<PathBuf> {
         "--message-format=json-render-diagnostics",
     ]);
     let display = display_command(&command);
-    let output = command.output()?;
-    io::stderr().write_all(&output.stderr)?;
+    let output = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait_with_output()?;
     if !output.status.success() {
-        io::stdout().write_all(&output.stdout)?;
         return Err(failure(format!("{display} exited with {}", output.status)));
     }
     release_executable_from_messages(&output.stdout)
