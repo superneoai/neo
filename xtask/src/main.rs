@@ -1118,6 +1118,8 @@ fn verify_bundled_executable(
             release_executable.display()
         )));
     }
+    // Code signing changes executable bytes and size, while LC_UUID survives cargo-packager's
+    // copy and codesign's re-signing.
     if bundled_identity.uuid != release_identity.uuid {
         return Err(failure(format!(
             "bundled executable LC_UUID {} does not match release artifact LC_UUID {}: {} != {}",
