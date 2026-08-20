@@ -1,4 +1,6 @@
 [workspace]
+members = ["xtask"]
+resolver = "3"
 
 [package]
 name = "neo"
