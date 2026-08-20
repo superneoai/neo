@@ -106,7 +106,11 @@ fn sign() -> Result<()> {
     if !app.is_dir() {
         return Err(failure(format!("missing app bundle: {}", app.display())));
     }
-    verify_bundle(&root, &app)?;
+    let attribution_count = verify_bundle(&root, &app)?;
+    println!(
+        "verified {} with {attribution_count} crate attributions",
+        app.display()
+    );
     let identity = signing_identity()?;
     let entitlements = root.join(ENTITLEMENTS);
     if !entitlements.is_file() {
@@ -278,7 +282,11 @@ fn notarize() -> Result<()> {
     if !app.is_dir() {
         return Err(failure(format!("missing app bundle: {}", app.display())));
     }
-    verify_bundle(&root, &app)?;
+    let attribution_count = verify_bundle(&root, &app)?;
+    println!(
+        "verified {} with {attribution_count} crate attributions",
+        app.display()
+    );
     run_command(Command::new("codesign").args([
         "--verify",
         "--deep",
@@ -446,10 +454,17 @@ fn verify_bundle(root: &Path, app: &Path) -> Result<usize> {
         }
     }
 
-    Ok(notices
+    let attribution_count = notices
         .lines()
         .filter(|line| line.starts_with("- ["))
-        .count())
+        .count();
+    if attribution_count == 0 {
+        return Err(failure(format!(
+            "third-party notices contain no crate attributions: {}",
+            bundled_notices.display()
+        )));
+    }
+    Ok(attribution_count)
 }
 
 fn require_nonempty(path: &Path, description: &str) -> Result<()> {
@@ -649,6 +664,14 @@ mod tests {
     fn rejects_empty_notices() {
         let fixture = Fixture::valid();
         fs::write(fixture.root.join(NOTICES), b"").unwrap();
+        assert!(fixture.verify().is_err());
+    }
+
+    #[test]
+    fn rejects_notices_without_attributions() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.root.join(NOTICES), b"# Notices\n").unwrap();
+        fs::write(fixture.app.join(BUNDLED_NOTICES), b"# Notices\n").unwrap();
         assert!(fixture.verify().is_err());
     }
 
