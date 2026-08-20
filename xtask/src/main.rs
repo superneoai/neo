@@ -87,6 +87,7 @@ impl ReleaseBuildEnvironment {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&home).join(".cargo"));
         reject_target_rustflags(root, &cargo_home)?;
+        reject_release_profile_overrides(root, &cargo_home)?;
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("target"));
@@ -280,6 +281,82 @@ fn reject_target_rustflags_for(
     Ok(())
 }
 
+fn reject_release_profile_overrides(root: &Path, cargo_home: &Path) -> Result<()> {
+    let mut environment_overrides = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.as_bytes().starts_with(b"CARGO_PROFILE_RELEASE_"))
+        .collect::<Vec<_>>();
+    environment_overrides.sort();
+    if let Some(name) = environment_overrides.first() {
+        return Err(failure(format!(
+            "release profile override environment variable {} is unsupported",
+            name.to_string_lossy()
+        )));
+    }
+
+    let manifest = root.join("Cargo.toml");
+    if let Some(configuration) = read_toml_file(&manifest, "Cargo manifest")? {
+        reject_release_profile_keys(&configuration, &manifest)?;
+    }
+    let mut paths = root
+        .ancestors()
+        .flat_map(|directory| {
+            [
+                directory.join(".cargo/config.toml"),
+                directory.join(".cargo/config"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    paths.extend([cargo_home.join("config.toml"), cargo_home.join("config")]);
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        if let Some(configuration) = read_toml_file(&path, "Cargo configuration")? {
+            reject_release_profile_keys(&configuration, &path)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_release_profile_keys(configuration: &toml::Value, path: &Path) -> Result<()> {
+    let Some(release) = configuration
+        .get("profile")
+        .and_then(|profile| profile.get("release"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(());
+    };
+    for key in ["opt-level", "debug-assertions", "overflow-checks"] {
+        if release.contains_key(key) {
+            return Err(failure(format!(
+                "profile.release.{key} in {} is unsupported for release packaging",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_toml_file(path: &Path, description: &str) -> Result<Option<toml::Value>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot read {description} {}: {error}", path.display()),
+            )
+            .into());
+        }
+    };
+    contents.parse::<toml::Value>().map(Some).map_err(|error| {
+        failure(format!(
+            "cannot parse {description} {}: {error}",
+            path.display()
+        ))
+    })
+}
+
 fn prepare_xcrun_wrapper(directory: &Path) -> Result<()> {
     const WRAPPER: &str = r#"#!/bin/sh
 if [ "$#" -ge 3 ] && [ "$1" = "-sdk" ] && [ "$3" = "metal" ]; then
@@ -379,13 +456,14 @@ fn package(profile: PackageProfile) -> Result<()> {
         PackageProfile::Release => Some(ReleaseBuildEnvironment::new(&root)?),
         PackageProfile::Debug => None,
     };
-    let mut build = Command::new("cargo");
-    if let Some(environment) = &build_environment {
-        environment.apply(&mut build);
-    }
-    build.args(["build", "--locked", "--package", "neo"]);
-    profile.apply(&mut build);
-    run_command(&mut build)?;
+    let release_executable = if let Some(environment) = &build_environment {
+        Some(run_release_build(environment)?)
+    } else {
+        let mut build = Command::new("cargo");
+        build.args(["build", "--locked", "--package", "neo"]);
+        run_command(&mut build)?;
+        None
+    };
     let mut packager = Command::new("cargo");
     if let Some(environment) = &build_environment {
         environment.apply(&mut packager);
@@ -403,12 +481,86 @@ fn package(profile: PackageProfile) -> Result<()> {
     }
 
     remove_carbon_key(&app.join("Contents/Info.plist"))?;
-    let attribution_count = verify_bundle(&root, &app, matches!(profile, PackageProfile::Release))?;
+    let attribution_count = verify_bundle(&root, &app, release_executable.as_deref())?;
     println!(
         "verified {} with {attribution_count} crate attributions",
         app.display()
     );
     Ok(())
+}
+
+fn run_release_build(environment: &ReleaseBuildEnvironment) -> Result<PathBuf> {
+    let mut command = Command::new("cargo");
+    environment.apply(&mut command);
+    command.args([
+        "build",
+        "--locked",
+        "--package",
+        "neo",
+        "--release",
+        "--message-format=json-render-diagnostics",
+    ]);
+    let display = display_command(&command);
+    let output = command.output()?;
+    io::stderr().write_all(&output.stderr)?;
+    if !output.status.success() {
+        io::stdout().write_all(&output.stdout)?;
+        return Err(failure(format!("{display} exited with {}", output.status)));
+    }
+    release_executable_from_messages(&output.stdout)
+}
+
+fn release_executable_from_messages(messages: &[u8]) -> Result<PathBuf> {
+    let mut artifact = None;
+    for line in messages
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let message: serde_json::Value = serde_json::from_slice(line)
+            .map_err(|error| failure(format!("invalid Cargo JSON message: {error}")))?;
+        let is_neo_bin = message.get("reason").and_then(serde_json::Value::as_str)
+            == Some("compiler-artifact")
+            && message
+                .pointer("/target/name")
+                .and_then(serde_json::Value::as_str)
+                == Some("neo")
+            && message
+                .pointer("/target/kind")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+        if !is_neo_bin {
+            continue;
+        }
+        let opt_level = message
+            .pointer("/profile/opt_level")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| failure("neo compiler artifact has no profile.opt_level"))?;
+        let debug_assertions = message
+            .pointer("/profile/debug_assertions")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| failure("neo compiler artifact has no profile.debug_assertions"))?;
+        if opt_level == "0" || debug_assertions {
+            return Err(failure(format!(
+                "neo compiler artifact has forbidden release profile: opt_level={opt_level:?}, debug_assertions={debug_assertions}"
+            )));
+        }
+        let executable = message
+            .get("executable")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| failure("neo compiler artifact has no executable path"))?;
+        artifact = Some(PathBuf::from(executable));
+        println!(
+            "verified release compiler artifact profile: opt_level={opt_level:?}, debug_assertions={debug_assertions}; executable={executable}"
+        );
+    }
+    artifact.ok_or_else(|| failure("Cargo emitted no compiler artifact for the neo bin target"))
+}
+
+fn configured_release_executable(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"))
+        .join("release/neo")
 }
 
 fn sign() -> Result<()> {
@@ -418,7 +570,8 @@ fn sign() -> Result<()> {
     if !app.is_dir() {
         return Err(failure(format!("missing app bundle: {}", app.display())));
     }
-    let attribution_count = verify_bundle(&root, &app, true)?;
+    let release_executable = configured_release_executable(&root);
+    let attribution_count = verify_bundle(&root, &app, Some(&release_executable))?;
     println!(
         "verified {} with {attribution_count} crate attributions",
         app.display()
@@ -631,7 +784,8 @@ fn notarize() -> Result<()> {
     if !app.is_dir() {
         return Err(failure(format!("missing app bundle: {}", app.display())));
     }
-    let attribution_count = verify_bundle(&root, &app, true)?;
+    let release_executable = configured_release_executable(&root);
+    let attribution_count = verify_bundle(&root, &app, Some(&release_executable))?;
     println!(
         "verified {} with {attribution_count} crate attributions",
         app.display()
@@ -774,7 +928,7 @@ fn remove_carbon_key(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn verify_bundle(root: &Path, app: &Path, verify_executable: bool) -> Result<usize> {
+fn verify_bundle(root: &Path, app: &Path, release_executable: Option<&Path>) -> Result<usize> {
     let plist_path = app.join("Contents/Info.plist");
     let plist = Value::from_file(&plist_path)?;
     let dictionary = plist.as_dictionary().ok_or_else(|| {
@@ -796,8 +950,8 @@ fn verify_bundle(root: &Path, app: &Path, verify_executable: bool) -> Result<usi
             plist_path.display()
         )));
     }
-    if verify_executable {
-        verify_bundled_executable(root, app, dictionary)?;
+    if let Some(release_executable) = release_executable {
+        verify_bundled_executable(root, app, dictionary, release_executable)?;
     }
 
     require_identical(
@@ -843,7 +997,13 @@ fn verify_bundled_executable(
     root: &Path,
     app: &Path,
     dictionary: &plist::Dictionary,
+    release_executable: &Path,
 ) -> Result<()> {
+    let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&home).join(".cargo"));
+    reject_release_profile_overrides(root, &cargo_home)?;
     let executable_name = dictionary
         .get("CFBundleExecutable")
         .and_then(Value::as_string)
@@ -893,11 +1053,7 @@ fn verify_bundled_executable(
         ))
     })?;
 
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"));
-    let release_executable = target.join("release").join(executable_name);
-    let release_metadata = fs::metadata(&release_executable).map_err(|error| {
+    let release_metadata = fs::metadata(release_executable).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -912,7 +1068,7 @@ fn verify_bundled_executable(
             release_executable.display()
         )));
     }
-    let release_bytes = fs::read(&release_executable).map_err(|error| {
+    let release_bytes = fs::read(release_executable).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -955,7 +1111,6 @@ fn verify_bundled_executable(
         cpu_type_name(release_identity.cpu_type)
     );
 
-    let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
     if home.is_empty() || home == "/" {
         return Err(failure("HOME is not a private path prefix"));
     }
@@ -1294,11 +1449,12 @@ mod tests {
         }
 
         fn verify(&self) -> Result<usize> {
-            verify_bundle(&self.root, &self.app, true)
+            let release_executable = self.release_executable();
+            verify_bundle(&self.root, &self.app, Some(&release_executable))
         }
 
         fn verify_debug(&self) -> Result<usize> {
-            verify_bundle(&self.root, &self.app, false)
+            verify_bundle(&self.root, &self.app, None)
         }
 
         fn executable(&self) -> PathBuf {
@@ -1380,6 +1536,86 @@ mod tests {
         let label = OsStr::new("Developer ID Application: Nonexistent Corp");
         let output = redact_bytes(identity.as_bytes(), &[(identity, label)]);
         assert_eq!(output, label.as_bytes());
+    }
+
+    #[test]
+    fn accepts_release_compiler_artifact_profile() {
+        let messages = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "neo", "kind": ["bin"] },
+            "profile": { "opt_level": "3", "debug_assertions": false },
+            "executable": "/target/release/neo"
+        })
+        .to_string();
+        assert_eq!(
+            release_executable_from_messages(messages.as_bytes()).unwrap(),
+            Path::new("/target/release/neo")
+        );
+    }
+
+    #[test]
+    fn rejects_unoptimized_release_compiler_artifact_profile() {
+        let messages = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "neo", "kind": ["bin"] },
+            "profile": { "opt_level": "0", "debug_assertions": false },
+            "executable": "/target/release/neo"
+        })
+        .to_string();
+        let error = release_executable_from_messages(messages.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("opt_level=\"0\""));
+    }
+
+    #[test]
+    fn rejects_debug_assertions_in_release_compiler_artifact_profile() {
+        let messages = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "neo", "kind": ["bin"] },
+            "profile": { "opt_level": "3", "debug_assertions": true },
+            "executable": "/target/release/neo"
+        })
+        .to_string();
+        let error = release_executable_from_messages(messages.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("debug_assertions=true"));
+    }
+
+    #[test]
+    fn rejects_release_profile_keys_in_root_manifest() {
+        for key in ["opt-level", "debug-assertions", "overflow-checks"] {
+            let fixture = Fixture::valid();
+            let cargo_home = fixture.root.join("cargo-home");
+            fs::write(
+                fixture.root.join("Cargo.toml"),
+                format!("[profile.release]\n{key} = false\n"),
+            )
+            .unwrap();
+            let error = reject_release_profile_overrides(&fixture.root, &cargo_home)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("profile.release.{key}")));
+            assert!(error.contains("Cargo.toml"));
+        }
+    }
+
+    #[test]
+    fn rejects_release_profile_keys_in_cargo_configuration() {
+        let fixture = Fixture::valid();
+        let cargo_home = fixture.root.join("cargo-home");
+        fs::create_dir_all(fixture.root.join(".cargo")).unwrap();
+        fs::write(
+            fixture.root.join(".cargo/config.toml"),
+            "[profile.release]\ndebug-assertions = true\n",
+        )
+        .unwrap();
+        let error = reject_release_profile_overrides(&fixture.root, &cargo_home)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("profile.release.debug-assertions"));
+        assert!(error.contains(".cargo/config.toml"));
     }
 
     #[test]
