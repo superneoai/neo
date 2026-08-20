@@ -133,6 +133,13 @@ fn sign() -> Result<()> {
         "--verbose=2",
         app.as_os_str().to_str().expect("UTF-8 app path"),
     ]))?;
+    let signature = command_output(Command::new("codesign").arg("-dvvv").arg(&app))?;
+    let signature_details = format!(
+        "{}{}",
+        String::from_utf8_lossy(&signature.stdout),
+        String::from_utf8_lossy(&signature.stderr)
+    );
+    validate_signature_details(&signature_details)?;
 
     let assessment = Command::new("spctl")
         .args(["-a", "-vvv", "-t", "install"])
@@ -154,6 +161,7 @@ fn signing_identity() -> Result<String> {
         if identity.trim().is_empty() {
             return Err(failure(format!("{SIGNING_IDENTITY_ENV} is empty")));
         }
+        validate_signing_identity(&identity)?;
         println!(
             "using signing identity from {SIGNING_IDENTITY_ENV}: {}",
             signing_identity_label(&identity)
@@ -194,11 +202,40 @@ fn signing_identity() -> Result<String> {
     }
 }
 
+fn validate_signing_identity(identity: &str) -> Result<()> {
+    if !identity.starts_with("Developer ID Application:") {
+        return Err(failure(format!(
+            "{SIGNING_IDENTITY_ENV} must start with Developer ID Application:"
+        )));
+    }
+    Ok(())
+}
+
 fn signing_identity_label(identity: &str) -> &str {
     identity
         .strip_suffix(')')
         .and_then(|identity| identity.rsplit_once(" (").map(|(label, _)| label))
         .unwrap_or(identity)
+}
+
+fn validate_signature_details(details: &str) -> Result<()> {
+    let has_developer_id_authority = details.lines().any(|line| {
+        line.trim_start()
+            .starts_with("Authority=Developer ID Application:")
+    });
+    if !has_developer_id_authority {
+        return Err(failure(
+            "codesign output has no Developer ID Application authority",
+        ));
+    }
+    let has_hardened_runtime = details.lines().any(|line| {
+        line.split_ascii_whitespace()
+            .any(|field| field.starts_with("flags=") && field.contains("runtime"))
+    });
+    if !has_hardened_runtime {
+        return Err(failure("codesign output has no hardened runtime flag"));
+    }
+    Ok(())
 }
 
 fn nested_code(app: &Path) -> Result<Vec<PathBuf>> {
@@ -576,6 +613,32 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn accepts_developer_id_signing_identity() {
+        assert!(validate_signing_identity("Developer ID Application: Example Corporation").is_ok());
+    }
+
+    #[test]
+    fn rejects_non_developer_id_signing_identity() {
+        assert!(validate_signing_identity("-").is_err());
+        assert!(validate_signing_identity("Apple Development: Example Corporation").is_err());
+    }
+
+    #[test]
+    fn validates_developer_id_signature_details() {
+        let valid = "CodeDirectory v=20500 flags=0x10000(runtime) hashes=1+1 location=embedded\nAuthority=Developer ID Application: Example Corporation (TEAMID1234)\n";
+        assert!(validate_signature_details(valid).is_ok());
+
+        let ad_hoc = "CodeDirectory v=20400 flags=0x2(adhoc) hashes=1+1 location=embedded\nSignature=adhoc\n";
+        assert!(validate_signature_details(ad_hoc).is_err());
+
+        let development = "CodeDirectory v=20500 flags=0x10000(runtime) hashes=1+1 location=embedded\nAuthority=Apple Development: Example Corporation (TEAMID1234)\n";
+        assert!(validate_signature_details(development).is_err());
+
+        let without_runtime = "CodeDirectory v=20500 flags=0x0(none) hashes=1+1 location=embedded\nAuthority=Developer ID Application: Example Corporation (TEAMID1234)\n";
+        assert!(validate_signature_details(without_runtime).is_err());
     }
 
     #[test]
