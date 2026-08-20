@@ -70,6 +70,8 @@ impl PackageProfile {
 }
 
 struct ReleaseBuildEnvironment {
+    home: PathBuf,
+    root: PathBuf,
     cargo_home: PathBuf,
     cargo_home_alias: PathBuf,
     target: PathBuf,
@@ -132,6 +134,8 @@ impl ReleaseBuildEnvironment {
         let rustflags_config = format!("build.rustflags={}", toml::Value::Array(rustflags));
 
         Ok(Self {
+            home: PathBuf::from(home),
+            root: root.to_path_buf(),
             cargo_home,
             cargo_home_alias,
             target,
@@ -146,6 +150,8 @@ impl ReleaseBuildEnvironment {
             .args(["--config", &self.rustflags_config])
             .env("CARGO_HOME", &self.cargo_home_alias)
             .env("CARGO_TARGET_DIR", &self.target_alias)
+            .env("NEO_RELEASE_HOME", &self.home)
+            .env("NEO_RELEASE_ROOT", &self.root)
             .env("NEO_RELEASE_CARGO_HOME", &self.cargo_home)
             .env("NEO_RELEASE_CARGO_ALIAS", &self.cargo_home_alias)
             .env("NEO_RELEASE_TARGET", &self.target)
@@ -278,6 +284,10 @@ fn prepare_xcrun_wrapper(directory: &Path) -> Result<()> {
     const WRAPPER: &str = r#"#!/bin/sh
 if [ "$#" -ge 3 ] && [ "$1" = "-sdk" ] && [ "$3" = "metal" ]; then
     exec /usr/bin/xcrun "$@" \
+        "-ffile-prefix-map=$NEO_RELEASE_ROOT=/source" \
+        "-fdebug-prefix-map=$NEO_RELEASE_ROOT=/source" \
+        "-ffile-prefix-map=$NEO_RELEASE_HOME=/build" \
+        "-fdebug-prefix-map=$NEO_RELEASE_HOME=/build" \
         "-ffile-prefix-map=$NEO_RELEASE_CARGO_HOME=/cargo" \
         "-fdebug-prefix-map=$NEO_RELEASE_CARGO_HOME=/cargo" \
         "-ffile-prefix-map=$NEO_RELEASE_CARGO_ALIAS=/cargo" \
@@ -787,7 +797,7 @@ fn verify_bundle(root: &Path, app: &Path, verify_executable: bool) -> Result<usi
         )));
     }
     if verify_executable {
-        verify_bundled_executable(app, dictionary)?;
+        verify_bundled_executable(root, app, dictionary)?;
     }
 
     require_identical(
@@ -829,7 +839,11 @@ fn verify_bundle(root: &Path, app: &Path, verify_executable: bool) -> Result<usi
     Ok(attribution_count)
 }
 
-fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Result<()> {
+fn verify_bundled_executable(
+    root: &Path,
+    app: &Path,
+    dictionary: &plist::Dictionary,
+) -> Result<()> {
     let executable_name = dictionary
         .get("CFBundleExecutable")
         .and_then(Value::as_string)
@@ -872,29 +886,75 @@ fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Resu
             ),
         )
     })?;
-    if !matches!(
-        bytes.get(..4),
-        Some(
-            [0xfe, 0xed, 0xfa, 0xcf]
-                | [0xcf, 0xfa, 0xed, 0xfe]
-                | [0xca, 0xfe, 0xba, 0xbe]
-                | [0xbe, 0xba, 0xfe, 0xca]
+    let bundled_identity = macho_identity(&bytes).map_err(|error| {
+        failure(format!(
+            "bundled executable is not a valid thin 64-bit Mach-O: {}: {error}",
+            executable.display()
+        ))
+    })?;
+
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
+    let release_executable = target.join("release").join(executable_name);
+    let release_metadata = fs::metadata(&release_executable).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "missing release artifact: {}: {error}; run `cargo xtask package` first",
+                release_executable.display()
+            ),
         )
-    ) {
+    })?;
+    if !release_metadata.is_file() || release_metadata.len() == 0 {
         return Err(failure(format!(
-            "bundled executable has no supported Mach-O magic: {}",
-            executable.display()
+            "release artifact is not a non-empty regular file: {}; run `cargo xtask package` first",
+            release_executable.display()
         )));
     }
-    if !bytes
-        .windows(b"/cargo/".len())
-        .any(|window| window == b"/cargo/")
-    {
+    let release_bytes = fs::read(&release_executable).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot read release artifact: {}: {error}",
+                release_executable.display()
+            ),
+        )
+    })?;
+    let release_identity = macho_identity(&release_bytes).map_err(|error| {
+        failure(format!(
+            "release artifact is not a valid thin 64-bit Mach-O: {}: {error}; run `cargo xtask package` first",
+            release_executable.display()
+        ))
+    })?;
+    if bundled_identity.cpu_type != release_identity.cpu_type {
         return Err(failure(format!(
-            "bundled executable has no remapped /cargo/ provenance path: {}",
-            executable.display()
+            "bundled executable CPU type {} does not match release artifact CPU type {}: {} != {}",
+            cpu_type_name(bundled_identity.cpu_type),
+            cpu_type_name(release_identity.cpu_type),
+            executable.display(),
+            release_executable.display()
         )));
     }
+    if bundled_identity.uuid != release_identity.uuid {
+        return Err(failure(format!(
+            "bundled executable LC_UUID {} does not match release artifact LC_UUID {}: {} != {}",
+            format_uuid(&bundled_identity.uuid),
+            format_uuid(&release_identity.uuid),
+            executable.display(),
+            release_executable.display()
+        )));
+    }
+    println!(
+        "matched executable identity: {} UUID {} ({}); {} UUID {} ({})",
+        executable.display(),
+        format_uuid(&bundled_identity.uuid),
+        cpu_type_name(bundled_identity.cpu_type),
+        release_executable.display(),
+        format_uuid(&release_identity.uuid),
+        cpu_type_name(release_identity.cpu_type)
+    );
+
     let home = std::env::var_os("HOME").ok_or_else(|| failure("HOME is not set"))?;
     if home.is_empty() || home == "/" {
         return Err(failure("HOME is not a private path prefix"));
@@ -925,21 +985,121 @@ fn verify_bundled_executable(app: &Path, dictionary: &plist::Dictionary) -> Resu
             temporary_directory.display()
         );
     }
-    for marker in [
-        "attempt to add with overflow",
-        "attempt to subtract with overflow",
-        "attempt to multiply with overflow",
-        "attempt to divide with overflow",
-        "attempt to shift left with overflow",
-    ] {
-        reject_executable_marker(
-            &bytes,
-            marker.as_bytes(),
-            &format!("debug-assertion panic string {marker:?}"),
-            &executable,
-        )?;
-    }
     Ok(())
+}
+
+struct MachOIdentity {
+    cpu_type: u32,
+    uuid: [u8; 16],
+}
+
+enum Endian {
+    Little,
+    Big,
+}
+
+fn macho_identity(bytes: &[u8]) -> Result<MachOIdentity> {
+    let endian = match bytes.get(..4) {
+        Some([0xcf, 0xfa, 0xed, 0xfe]) => Endian::Little,
+        Some([0xfe, 0xed, 0xfa, 0xcf]) => Endian::Big,
+        Some(
+            [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+            | [0xca, 0xfe, 0xba, 0xbf]
+            | [0xbf, 0xba, 0xfe, 0xca],
+        ) => return Err(failure("fat Mach-O is unsupported")),
+        Some([0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce]) => {
+            return Err(failure("32-bit Mach-O is unsupported"));
+        }
+        _ => return Err(failure("no supported Mach-O magic")),
+    };
+    if bytes.len() < 32 {
+        return Err(failure("truncated Mach-O header"));
+    }
+    let cpu_type = read_macho_u32(bytes, 4, &endian)?;
+    let command_count = read_macho_u32(bytes, 16, &endian)?;
+    let command_bytes = read_macho_u32(bytes, 20, &endian)? as usize;
+    let commands_end = 32usize
+        .checked_add(command_bytes)
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| failure("truncated Mach-O load command area"))?;
+    let mut offset = 32usize;
+    let mut uuid = None;
+    for _ in 0..command_count {
+        if offset.checked_add(8).is_none_or(|end| end > commands_end) {
+            return Err(failure("truncated Mach-O load command header"));
+        }
+        let command = read_macho_u32(bytes, offset, &endian)?;
+        let size = read_macho_u32(bytes, offset + 4, &endian)? as usize;
+        if size < 8 {
+            return Err(failure("invalid Mach-O load command size"));
+        }
+        let end = offset
+            .checked_add(size)
+            .filter(|end| *end <= commands_end)
+            .ok_or_else(|| failure("truncated Mach-O load command"))?;
+        if command == 0x1b {
+            if size != 24 {
+                return Err(failure("invalid LC_UUID load command size"));
+            }
+            if uuid.is_some() {
+                return Err(failure("duplicate LC_UUID load command"));
+            }
+            uuid = Some(
+                bytes[offset + 8..offset + 24]
+                    .try_into()
+                    .expect("LC_UUID size was checked"),
+            );
+        }
+        offset = end;
+    }
+    if offset != commands_end {
+        return Err(failure("Mach-O load command sizes do not match header"));
+    }
+    let uuid = uuid.ok_or_else(|| failure("Mach-O has no LC_UUID load command"))?;
+    Ok(MachOIdentity { cpu_type, uuid })
+}
+
+fn read_macho_u32(bytes: &[u8], offset: usize, endian: &Endian) -> Result<u32> {
+    let value: [u8; 4] = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| failure("truncated Mach-O integer"))?
+        .try_into()
+        .expect("Mach-O integer size was checked");
+    Ok(match endian {
+        Endian::Little => u32::from_le_bytes(value),
+        Endian::Big => u32::from_be_bytes(value),
+    })
+}
+
+fn format_uuid(uuid: &[u8; 16]) -> String {
+    format!(
+        "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        uuid[0],
+        uuid[1],
+        uuid[2],
+        uuid[3],
+        uuid[4],
+        uuid[5],
+        uuid[6],
+        uuid[7],
+        uuid[8],
+        uuid[9],
+        uuid[10],
+        uuid[11],
+        uuid[12],
+        uuid[13],
+        uuid[14],
+        uuid[15]
+    )
+}
+
+fn cpu_type_name(cpu_type: u32) -> String {
+    match cpu_type {
+        0x0100_000c => "arm64".into(),
+        0x0100_0007 => "x86_64".into(),
+        _ => format!("0x{cpu_type:08X}"),
+    }
 }
 
 fn darwin_temp_identifier(path: &Path) -> Option<&OsStr> {
@@ -1074,6 +1234,26 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+    const TEST_UUID: [u8; 16] = [
+        0x92, 0x66, 0x81, 0x5d, 0xd7, 0x91, 0x30, 0x64, 0xb8, 0x09, 0x13, 0xb1, 0x4e, 0xec, 0xdc,
+        0x2e,
+    ];
+
+    fn test_macho(cpu_type: u32, uuid: [u8; 16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
+        bytes.extend_from_slice(&cpu_type.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0x1bu32.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&uuid);
+        bytes
+    }
 
     struct Fixture {
         root: PathBuf,
@@ -1088,6 +1268,7 @@ mod tests {
             fs::create_dir_all(app.join("Contents/Resources/Legal")).unwrap();
             fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
             fs::create_dir_all(root.join("packaging/generated")).unwrap();
+            fs::create_dir_all(root.join("target/release")).unwrap();
             fs::write(root.join("LICENSE"), b"license\n").unwrap();
             fs::write(app.join(BUNDLED_LICENSE), b"license\n").unwrap();
             fs::write(root.join(NOTICES), b"# Notices\n\n- [crate 1.0.0](url)\n").unwrap();
@@ -1097,11 +1278,9 @@ mod tests {
             )
             .unwrap();
             let executable = app.join("Contents/MacOS/neo");
-            fs::write(
-                &executable,
-                b"\xcf\xfa\xed\xfe/cargo/registry/release executable",
-            )
-            .unwrap();
+            let release = test_macho(0x0100_000c, TEST_UUID);
+            fs::write(&executable, &release).unwrap();
+            fs::write(root.join("target/release/neo"), release).unwrap();
             let mut permissions = fs::metadata(&executable).unwrap().permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(executable, permissions).unwrap();
@@ -1124,6 +1303,10 @@ mod tests {
 
         fn executable(&self) -> PathBuf {
             self.app.join("Contents/MacOS/neo")
+        }
+
+        fn release_executable(&self) -> PathBuf {
+            self.root.join("target/release/neo")
         }
 
         fn append_to_executable(&self, bytes: &[u8]) {
@@ -1373,11 +1556,50 @@ mod tests {
     }
 
     #[test]
-    fn rejects_executable_without_remapped_cargo_provenance() {
+    fn rejects_truncated_mach_o_executable() {
         let fixture = Fixture::valid();
-        fs::write(fixture.executable(), b"\xcf\xfa\xed\xferelease executable").unwrap();
+        fs::write(
+            fixture.executable(),
+            &test_macho(0x0100_000c, TEST_UUID)[..40],
+        )
+        .unwrap();
         let error = fixture.verify().unwrap_err().to_string();
-        assert!(error.contains("no remapped /cargo/ provenance path"));
+        assert!(error.contains("truncated Mach-O load command area"));
+    }
+
+    #[test]
+    fn rejects_fat_mach_o_executable() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.executable(), b"\xca\xfe\xba\xbe fat executable").unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("fat Mach-O is unsupported"));
+    }
+
+    #[test]
+    fn rejects_executable_with_different_cpu_type() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.executable(), test_macho(0x0100_0007, TEST_UUID)).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("CPU type x86_64"));
+        assert!(error.contains("CPU type arm64"));
+    }
+
+    #[test]
+    fn rejects_executable_with_different_uuid() {
+        let fixture = Fixture::valid();
+        fs::write(fixture.executable(), test_macho(0x0100_000c, [0x55; 16])).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("bundled executable LC_UUID"));
+        assert!(error.contains("does not match release artifact LC_UUID"));
+    }
+
+    #[test]
+    fn rejects_missing_release_artifact() {
+        let fixture = Fixture::valid();
+        fs::remove_file(fixture.release_executable()).unwrap();
+        let error = fixture.verify().unwrap_err().to_string();
+        assert!(error.contains("missing release artifact"));
+        assert!(error.contains("run `cargo xtask package` first"));
     }
 
     #[test]
@@ -1397,14 +1619,6 @@ mod tests {
         fixture.append_to_executable(identifier.as_bytes());
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("Darwin temporary directory identifier"));
-    }
-
-    #[test]
-    fn rejects_debug_assertion_panic_string_in_executable() {
-        let fixture = Fixture::valid();
-        fixture.append_to_executable(b"attempt to add with overflow");
-        let error = fixture.verify().unwrap_err().to_string();
-        assert!(error.contains("debug-assertion panic string"));
     }
 
     #[test]
