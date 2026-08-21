@@ -1,7 +1,10 @@
 mod menu;
 
 use libneo::theme::{Theme, ThemeMode};
-use libneo::window::{Context, IntoElement, Render, Styled, Window, WindowBuilder, div, run};
+use libneo::window::{
+    Context, IntoElement, Render, Styled, Window, WindowBackground, WindowBackgroundAppearance,
+    WindowBuilder, WindowChrome, div, run,
+};
 
 struct AppRoot;
 
@@ -26,7 +29,13 @@ fn run_with<V>(
 
 fn main() {
     run_with(
-        WindowBuilder::new().title("NEO"),
+        WindowBuilder::new()
+            .title("NEO")
+            .size(1500.0, 800.0)
+            .minimum_size(900.0, 600.0)
+            .background_appearance(WindowBackgroundAppearance::Opaque)
+            .background(WindowBackground::Standard)
+            .chrome(WindowChrome::Toolbar),
         |cx| {
             menu::install(cx);
             Theme::set_mode(ThemeMode::FollowSystem, cx);
