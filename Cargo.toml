@@ -13,22 +13,10 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
-libneo = { git = "https://github.com/superneoai/libneo.git", rev = "8777b3525f796e9a7da050092bd872425646cb01", default-features = false, features = [
+libneo = { git = "https://github.com/superneoai/libneo.git", rev = "58b64f95a82f1c0f4125be33a4a8421bc590d0c2", default-features = false, features = [
   "gpui",
 ] }
 
-# GPUI links `ztracing`, which Zed publishes under `GPL-3.0-or-later`. The
-# libneo repository holds a permissive compatibility crate.
-# Zed tracks the license state in
-# https://github.com/zed-industries/zed/issues/55470.
-[patch."https://github.com/zed-industries/zed"]
-ztracing = { git = "https://github.com/superneoai/libneo.git", rev = "8777b3525f796e9a7da050092bd872425646cb01" }
-
-[patch."https://github.com/zed-industries/font-kit"]
-zed-font-kit = { version = "=0.14.1-zed" }
-
-[patch.crates-io]
-block = { git = "https://github.com/superneoai/libneo.git", rev = "8777b3525f796e9a7da050092bd872425646cb01" }
 
 [package.metadata.packager]
 formats = ["app"]
