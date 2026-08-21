@@ -18,6 +18,9 @@ libneo = { git = "https://github.com/superneoai/libneo.git", rev = "904fb40fa2ff
   "gpui",
 ] }
 
+# Apply libneo's fixed block implementation from the workspace root.
+[patch.crates-io]
+block = { git = "https://github.com/superneoai/libneo.git", rev = "904fb40fa2ff249af49a8f90734fa672b3797746" }
 
 [package.metadata.packager]
 formats = ["app"]

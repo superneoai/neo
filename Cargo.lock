@@ -595,8 +595,7 @@ dependencies = [
 [[package]]
 name = "block"
 version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
+source = "git+https://github.com/superneoai/libneo.git?rev=904fb40fa2ff249af49a8f90734fa672b3797746#904fb40fa2ff249af49a8f90734fa672b3797746"
 
 [[package]]
 name = "block-buffer"
