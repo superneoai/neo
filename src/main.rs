@@ -1,20 +1,22 @@
 mod menu;
 
-use libneo::theme::{Theme, ThemeMode};
 use libneo::window::{
     Context, IntoElement, Render, Styled, VisualEffectMaterial, Window, WindowBackground,
     WindowBackgroundAppearance, WindowBuilder, WindowChrome, div, run,
 };
+use neo::theme::{Theme, ThemeMode};
 
 const WINDOW_SIZE: (f32, f32) = (1500.0, 800.0);
 const MINIMUM_SIZE: (f32, f32) = (900.0, 600.0);
+const WINDOW_CONTROLS_POSITION: (f32, f32) = (14.0, 14.0);
+const CONTENT_BACKGROUND_ALPHA: f32 = 0.18;
 
 struct AppRoot;
 
 impl Render for AppRoot {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut background = Theme::global(cx).tokens().background;
-        background.a = 0.18;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut background = Theme::global(cx).tokens(window).background;
+        background.a = CONTENT_BACKGROUND_ALPHA;
 
         div().size_full().bg(background)
     }
@@ -35,18 +37,18 @@ fn run_with<V>(
 
 fn main() {
     run_with(
-        WindowBuilder::new()
-            .title("NEO")
-            .size(WINDOW_SIZE.0, WINDOW_SIZE.1)
-            .minimum_size(MINIMUM_SIZE.0, MINIMUM_SIZE.1)
-            .background_appearance(WindowBackgroundAppearance::Transparent)
-            .background(WindowBackground::VisualEffect(
-                VisualEffectMaterial::UnderWindowBackground,
-            ))
-            .chrome(WindowChrome::Toolbar),
+        WindowBuilder::new(
+            "NEO",
+            WINDOW_SIZE,
+            MINIMUM_SIZE,
+            WINDOW_CONTROLS_POSITION,
+            WindowChrome::TransparentTitleBar,
+            WindowBackground::VisualEffect(VisualEffectMaterial::UnderWindowBackground),
+            WindowBackgroundAppearance::Transparent,
+        ),
         |cx| {
             menu::install(cx);
-            Theme::set_mode(ThemeMode::FollowSystem, cx);
+            Theme::install(ThemeMode::FollowSystem, cx);
         },
         |_| AppRoot,
     );
