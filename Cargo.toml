@@ -14,7 +14,7 @@ publish = false
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
-libneo = { git = "https://github.com/superneoai/libneo.git", rev = "40c8ef17ae1d204ae0eb7ad6498c113df224ea9a", default-features = false, features = [
+libneo = { git = "https://github.com/superneoai/libneo.git", rev = "904fb40fa2ff249af49a8f90734fa672b3797746", default-features = false, features = [
   "gpui",
 ] }
 

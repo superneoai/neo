@@ -12,8 +12,8 @@ Origin, copyright assignment, or sign-off.
 ## Development
 
 Run `just` to list development commands. Use `just run` for the pinned libneo
-revision, `just local-run` for the sibling libneo checkout, and `just gate`
-before pushing.
+revision, `just dev` for sibling local checkouts, `just local` to run Cargo with
+local dependency overrides, and `just ci` before pushing.
 
 ## Release architecture scope
 

@@ -62,8 +62,8 @@ jobs:
       - name: Install cargo-about
         run: cargo install cargo-about --version 0.8.2 --locked
         timeout-minutes: 10
-      - name: Package and verify
-        run: cargo xtask package
+      - name: Bundle and verify
+        run: cargo xtask bundle
         timeout-minutes: 45
 
   licenses:

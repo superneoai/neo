@@ -2,13 +2,14 @@ mod menu;
 
 use libneo::window::{
     Context, IntoElement, Render, Styled, VisualEffectMaterial, Window, WindowBackground,
-    WindowBackgroundAppearance, WindowBuilder, WindowChrome, div, run,
+    WindowBackgroundAppearance, WindowBuilder, WindowChrome, WindowCornerRadius, div, run,
 };
 use neo::theme::{Theme, ThemeMode};
 
-const WINDOW_SIZE: (f32, f32) = (1500.0, 800.0);
+const WINDOW_SIZE: (f32, f32) = (1280.0, 800.0);
 const MINIMUM_SIZE: (f32, f32) = (900.0, 600.0);
 const WINDOW_CONTROLS_POSITION: (f32, f32) = (14.0, 14.0);
+const WINDOW_CORNER_RADIUS: f32 = 16.0;
 const CONTENT_BACKGROUND_ALPHA: f32 = 0.18;
 
 struct AppRoot;
@@ -42,6 +43,7 @@ fn main() {
             WINDOW_SIZE,
             MINIMUM_SIZE,
             WINDOW_CONTROLS_POSITION,
+            WindowCornerRadius::Fixed(WINDOW_CORNER_RADIUS),
             WindowChrome::TransparentTitleBar,
             WindowBackground::VisualEffect(VisualEffectMaterial::UnderWindowBackground),
             WindowBackgroundAppearance::Transparent,
