@@ -26,6 +26,9 @@ const EXPECTED_METAL_TOOL_PREFIX: &str = "/private/var/run/com.apple.security.cr
 const EXPECTED_METAL_TOOL_SUFFIX: &str =
     "/Metal.xctoolchain/usr/metal/32023/bin/metallib shaders.air -o shaders.metallib";
 const LIBNEO_HTTPS_SOURCE: &str = "https://github.com/superneoai/libneo.git";
+const LOCAL_LIBNEO_PATCH: &str =
+    "patch.\"https://github.com/superneoai/libneo.git\".libneo.path=\"../libneo/crates/libneo\"";
+const LOCAL_LIBNEO_GPUI_PATCH: &str = "patch.\"https://github.com/superneoai/libneo.git\".libneo-gpui.path=\"../libneo/crates/libneo-gpui\"";
 const MINIMUM_SDK_MAJOR: u32 = 26;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -43,27 +46,50 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut arguments = std::env::args_os();
-    let _program = arguments.next();
-    match (
-        arguments.next().as_deref(),
-        arguments.next().as_deref(),
-        arguments.next(),
-    ) {
-        (Some(command), None, None) if command == "check-source" => {
-            verify_pinned_source(&repository_root())
-        }
-        (Some(command), None, None) if command == "check-sdk" => verify_sdk(),
-        (Some(command), None, None) if command == "package" => package(PackageProfile::Release),
-        (Some(command), Some(option), None) if command == "package" && option == "--debug" => {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [command] if command == "check-source" => verify_pinned_source(&repository_root()),
+        [command] if command == "check-sdk" => verify_sdk(),
+        [command] if command == "package" => package(PackageProfile::Release),
+        [command, option] if command == "package" && option == "--debug" => {
             package(PackageProfile::Debug)
         }
-        (Some(command), None, None) if command == "sign" => sign(),
-        (Some(command), None, None) if command == "notarize" => notarize(),
+        [command] if command == "sign" => sign(),
+        [command] if command == "notarize" => notarize(),
+        [command, cargo_arguments @ ..]
+            if command == "local-cargo" && !cargo_arguments.is_empty() =>
+        {
+            local_cargo(cargo_arguments)
+        }
         _ => Err(failure(
-            "usage: cargo xtask <check-source|check-sdk|package [--debug]|sign|notarize>",
+            "usage: cargo xtask <check-source|check-sdk|package [--debug]|sign|notarize|local-cargo <arguments...>>",
         )),
     }
+}
+
+fn local_cargo(arguments: &[OsString]) -> Result<()> {
+    let root = repository_root();
+    let lockfile_path = root.join("Cargo.lock");
+    let lockfile = fs::read(&lockfile_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot read {}: {error}", lockfile_path.display()),
+        )
+    })?;
+    let result = run_command(
+        Command::new("cargo")
+            .current_dir(&root)
+            .args(["--config", LOCAL_LIBNEO_PATCH])
+            .args(["--config", LOCAL_LIBNEO_GPUI_PATCH])
+            .args(arguments),
+    );
+    fs::write(&lockfile_path, lockfile).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot restore {}: {error}", lockfile_path.display()),
+        )
+    })?;
+    result
 }
 
 fn verify_pinned_source(root: &Path) -> Result<()> {
