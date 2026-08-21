@@ -6,8 +6,10 @@ use libneo::install;
 use libneo::layers::{
     AnchorCorner, Edges, LayerFitting, LayerPositionMode, OVERLAY_PRIORITY, Overlay, overlay, point,
 };
+use libneo::menu::{About, Settings, Zoom};
 use libneo::table::{FontWeight, NativeTextTableRow, native_text_table};
 use libneo::theme::{Theme, ThemeAppearance, ThemeMode, ThemeTokens};
+use libneo::toolbar::{Toolbar, ToolbarItem, ToolbarSystemItem};
 use libneo::window::{
     Context, DefaultColors, IntoElement, ParentElement, Render, Rgba, Styled, VisualEffectMaterial,
     Window, WindowBackground, WindowBackgroundAppearance, WindowBuilder, WindowChrome, div, px,
@@ -41,6 +43,12 @@ enum Surface {
     Sidebar,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolbarMode {
+    Declared,
+    Empty,
+}
+
 impl Surface {
     fn background(self) -> WindowBackground {
         match self {
@@ -64,6 +72,7 @@ struct HarnessConfiguration {
     theme: ThemeMode,
     surface: Surface,
     chrome: WindowChrome,
+    toolbar: ToolbarMode,
     background_appearance: WindowBackgroundAppearance,
 }
 
@@ -74,6 +83,7 @@ impl Default for HarnessConfiguration {
             theme: ThemeMode::Light,
             surface: Surface::Standard,
             chrome: WindowChrome::Toolbar,
+            toolbar: ToolbarMode::Declared,
             background_appearance: WindowBackgroundAppearance::Opaque,
         }
     }
@@ -125,6 +135,13 @@ impl HarnessConfiguration {
                         "transparent" => WindowBackgroundAppearance::Transparent,
                         "blurred" => WindowBackgroundAppearance::Blurred,
                         _ => panic!("unknown background appearance {value}"),
+                    };
+                }
+                "--toolbar" => {
+                    configuration.toolbar = match value {
+                        "declared" => ToolbarMode::Declared,
+                        "empty" => ToolbarMode::Empty,
+                        _ => panic!("unknown toolbar mode {value}"),
                     };
                 }
                 _ => panic!("unknown option {option}"),
@@ -348,26 +365,49 @@ fn hsv_color(hue: f32, saturation: f32, value: f32) -> Rgba {
     }
 }
 
+fn harness_toolbar(mode: ToolbarMode) -> Toolbar {
+    let toolbar = Toolbar::new(match mode {
+        ToolbarMode::Declared => "conformance.declared-toolbar",
+        ToolbarMode::Empty => "conformance.empty-toolbar",
+    });
+    match mode {
+        ToolbarMode::Declared => toolbar.items([
+            ToolbarItem::action("conformance.about", "About libneo", About).symbol("info.circle"),
+            ToolbarItem::action("conformance.zoom", "Zoom", Zoom)
+                .symbol("arrow.up.left.and.arrow.down.right"),
+            ToolbarItem::system(ToolbarSystemItem::FlexibleSpace),
+            ToolbarItem::action("conformance.disabled", "Disabled", Settings)
+                .symbol("nosign")
+                .enabled(false),
+        ]),
+        ToolbarMode::Empty => toolbar,
+    }
+}
+
 fn main() {
     let configuration = HarnessConfiguration::parse(env::args().skip(1));
-    run(
-        WindowBuilder::new()
-            .title("libneo conformance")
-            .size(WINDOW_SIZE.0, WINDOW_SIZE.1)
-            .minimum_size(MINIMUM_SIZE.0, MINIMUM_SIZE.1)
-            .window_controls_position(WINDOW_CONTROLS_POSITION.0, WINDOW_CONTROLS_POSITION.1)
-            .background_appearance(configuration.background_appearance)
-            .background(configuration.surface.background())
-            .chrome(configuration.chrome),
-        move |cx| {
-            install(cx);
-            Theme::set_mode(configuration.theme, cx);
-            ConformanceHarness {
-                configuration,
-                rows: demo_rows(),
-            }
-        },
-    );
+    let window = WindowBuilder::new()
+        .title("libneo conformance")
+        .size(WINDOW_SIZE.0, WINDOW_SIZE.1)
+        .minimum_size(MINIMUM_SIZE.0, MINIMUM_SIZE.1)
+        .window_controls_position(WINDOW_CONTROLS_POSITION.0, WINDOW_CONTROLS_POSITION.1)
+        .background_appearance(configuration.background_appearance)
+        .background(configuration.surface.background())
+        .chrome(configuration.chrome);
+    let window = if configuration.chrome == WindowChrome::Toolbar {
+        window.toolbar(harness_toolbar(configuration.toolbar))
+    } else {
+        window
+    };
+
+    run(window, move |cx| {
+        install(cx);
+        Theme::set_mode(configuration.theme, cx);
+        ConformanceHarness {
+            configuration,
+            rows: demo_rows(),
+        }
+    });
 }
 
 #[cfg(test)]
@@ -379,7 +419,7 @@ mod tests {
         VisualEffectMaterial, WindowBackground, WindowBackgroundAppearance, WindowChrome, rgba,
     };
 
-    use super::{HarnessConfiguration, Page, ROW_COUNT, Surface, demo_rows};
+    use super::{HarnessConfiguration, Page, ROW_COUNT, Surface, ToolbarMode, demo_rows};
 
     #[test]
     fn builds_the_complete_demo_row_set() {
@@ -400,6 +440,7 @@ mod tests {
             "--surface=under-window",
             "--chrome=transparent",
             "--background=transparent",
+            "--toolbar=empty",
         ]);
         let dark = HarnessConfiguration::parse([
             "--theme=dark",
@@ -417,6 +458,7 @@ mod tests {
         assert_eq!(system.theme, ThemeMode::FollowSystem);
         assert_eq!(system.surface, Surface::UnderWindowBackground);
         assert_eq!(system.chrome, WindowChrome::TransparentTitleBar);
+        assert_eq!(system.toolbar, ToolbarMode::Empty);
         assert_eq!(
             system.background_appearance,
             WindowBackgroundAppearance::Transparent
