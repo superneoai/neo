@@ -1,3 +1,5 @@
+mod menu;
+
 use libneo::theme::{Theme, ThemeMode};
 use libneo::window::{Context, IntoElement, Render, Styled, Window, WindowBuilder, div, run};
 
@@ -25,7 +27,10 @@ fn run_with<V>(
 fn main() {
     run_with(
         WindowBuilder::new().title("NEO"),
-        |cx| Theme::set_mode(ThemeMode::FollowSystem, cx),
+        |cx| {
+            menu::install(cx);
+            Theme::set_mode(ThemeMode::FollowSystem, cx);
+        },
         |_| AppRoot,
     );
 }
