@@ -12,8 +12,17 @@ Origin, copyright assignment, or sign-off.
 ## Development
 
 Run `just` to list development commands. Use `just run` for the pinned libneo
-revision, `just dev` for sibling local checkouts, `just local` to run Cargo with
-local dependency overrides, and `just ci` before pushing.
+revision and `just ci` before pushing.
+
+Set `NEO_LOCAL_LIBNEO_PATH` to the path of a libneo checkout before using
+`just dev` or `just local`. Relative paths start at the NEO repository root. One
+checkout path supplies the overrides for both `crates/libneo` and
+`crates/libneo-gpui`:
+
+```sh
+NEO_LOCAL_LIBNEO_PATH=../libneo just local check
+NEO_LOCAL_LIBNEO_PATH=../libneo just dev
+```
 
 ## Release architecture scope
 

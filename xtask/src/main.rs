@@ -26,11 +26,36 @@ const EXPECTED_METAL_TOOL_PREFIX: &str = "/private/var/run/com.apple.security.cr
 const EXPECTED_METAL_TOOL_SUFFIX: &str =
     "/Metal.xctoolchain/usr/metal/32023/bin/metallib shaders.air -o shaders.metallib";
 const LIBNEO_HTTPS_SOURCE: &str = "https://github.com/superneoai/libneo.git";
-const LOCAL_DEPENDENCY_OVERRIDES: &[&str] = &[
-    "patch.\"https://github.com/superneoai/libneo.git\".libneo.path=\"../libneo/crates/libneo\"",
-    "patch.\"https://github.com/superneoai/libneo.git\".libneo-gpui.path=\"../libneo/crates/libneo-gpui\"",
+const LOCAL_LIBNEO_PATH_ENV: &str = "NEO_LOCAL_LIBNEO_PATH";
+const LOCAL_LIBNEO_CRATES: &[LocalCrate] = &[
+    LocalCrate {
+        name: "libneo",
+        relative_path: "crates/libneo",
+    },
+    LocalCrate {
+        name: "libneo-gpui",
+        relative_path: "crates/libneo-gpui",
+    },
 ];
+const LOCAL_DEPENDENCY_CHECKOUTS: &[LocalDependencyCheckout] = &[LocalDependencyCheckout {
+    environment_variable: LOCAL_LIBNEO_PATH_ENV,
+    source: LIBNEO_HTTPS_SOURCE,
+    description: "libneo checkout",
+    crates: LOCAL_LIBNEO_CRATES,
+}];
 const MINIMUM_SDK_MAJOR: u32 = 26;
+
+struct LocalCrate {
+    name: &'static str,
+    relative_path: &'static str,
+}
+
+struct LocalDependencyCheckout {
+    environment_variable: &'static str,
+    source: &'static str,
+    description: &'static str,
+    crates: &'static [LocalCrate],
+}
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -69,6 +94,7 @@ fn run() -> Result<()> {
 
 fn local_cargo(arguments: &[OsString]) -> Result<()> {
     let root = repository_root();
+    let dependency_overrides = local_dependency_overrides(&root)?;
     let lockfile_path = root.join("Cargo.lock");
     let lockfile = fs::read(&lockfile_path).map_err(|error| {
         io::Error::new(
@@ -78,7 +104,7 @@ fn local_cargo(arguments: &[OsString]) -> Result<()> {
     })?;
     let mut command = Command::new("cargo");
     command.current_dir(&root);
-    for dependency_override in LOCAL_DEPENDENCY_OVERRIDES {
+    for dependency_override in &dependency_overrides {
         command.args(["--config", dependency_override]);
     }
     let result = run_command(command.args(arguments));
@@ -89,6 +115,154 @@ fn local_cargo(arguments: &[OsString]) -> Result<()> {
         )
     })?;
     result
+}
+
+fn local_dependency_overrides(root: &Path) -> Result<Vec<String>> {
+    configured_local_dependency_overrides(root, |name| std::env::var_os(name))
+}
+
+fn configured_local_dependency_overrides(
+    root: &Path,
+    mut environment: impl FnMut(&str) -> Option<OsString>,
+) -> Result<Vec<String>> {
+    let mut overrides = Vec::new();
+    for checkout in LOCAL_DEPENDENCY_CHECKOUTS {
+        let value = environment(checkout.environment_variable)
+            .ok_or_else(|| missing_local_checkout_configuration(checkout, "is not set"))?;
+        if value.is_empty() {
+            return Err(missing_local_checkout_configuration(checkout, "is empty"));
+        }
+        let configured_path = PathBuf::from(value);
+        let checkout_path = if configured_path.is_absolute() {
+            configured_path.clone()
+        } else {
+            root.join(&configured_path)
+        };
+        match fs::metadata(&checkout_path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(invalid_local_checkout(
+                    checkout,
+                    format!("is not a directory: {}", configured_path.display()),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(invalid_local_checkout(
+                    checkout,
+                    format!(
+                        "points to a directory that does not exist: {}",
+                        configured_path.display()
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(invalid_local_checkout(
+                    checkout,
+                    format!("cannot access {}: {error}", configured_path.display()),
+                ));
+            }
+        }
+        let checkout_path = fs::canonicalize(&checkout_path)?;
+        for local_crate in checkout.crates {
+            validate_local_crate(checkout, &checkout_path, &configured_path, local_crate)?;
+            let crate_path = checkout_path.join(local_crate.relative_path);
+            let source = toml::Value::String(checkout.source.into());
+            let path = toml::Value::String(
+                crate_path
+                    .to_str()
+                    .ok_or_else(|| {
+                        invalid_local_checkout(
+                            checkout,
+                            format!("contains a non-UTF-8 path: {}", configured_path.display()),
+                        )
+                    })?
+                    .into(),
+            );
+            overrides.push(format!("patch.{source}.{}.path={path}", local_crate.name));
+        }
+    }
+    Ok(overrides)
+}
+
+fn validate_local_crate(
+    checkout: &LocalDependencyCheckout,
+    checkout_path: &Path,
+    configured_path: &Path,
+    local_crate: &LocalCrate,
+) -> Result<()> {
+    let relative_manifest = Path::new(local_crate.relative_path).join("Cargo.toml");
+    let manifest_path = checkout_path.join(&relative_manifest);
+    let displayed_manifest = configured_path.join(&relative_manifest);
+    let manifest = fs::read_to_string(&manifest_path).map_err(|error| {
+        invalid_local_checkout(
+            checkout,
+            format!(
+                "does not contain the expected {} crate manifest at {}: {error}",
+                local_crate.name,
+                displayed_manifest.display()
+            ),
+        )
+    })?;
+    let manifest = manifest.parse::<toml::Value>().map_err(|error| {
+        invalid_local_checkout(
+            checkout,
+            format!(
+                "contains an invalid {} crate manifest at {}: {error}",
+                local_crate.name,
+                displayed_manifest.display()
+            ),
+        )
+    })?;
+    let package_name = manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str);
+    if package_name != Some(local_crate.name) {
+        return Err(invalid_local_checkout(
+            checkout,
+            format!(
+                "has package name {:?} at {}, expected {:?}",
+                package_name,
+                displayed_manifest.display(),
+                local_crate.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn missing_local_checkout_configuration(
+    checkout: &LocalDependencyCheckout,
+    reason: &str,
+) -> Box<dyn Error> {
+    failure(format!(
+        "{} {reason}; set it to the path of a {} containing {}",
+        checkout.environment_variable,
+        checkout.description,
+        expected_local_crates(checkout)
+    ))
+}
+
+fn invalid_local_checkout(
+    checkout: &LocalDependencyCheckout,
+    reason: impl std::fmt::Display,
+) -> Box<dyn Error> {
+    failure(format!(
+        "{} {reason}; set {} to the path of a {} containing {}",
+        checkout.environment_variable,
+        checkout.environment_variable,
+        checkout.description,
+        expected_local_crates(checkout)
+    ))
+}
+
+fn expected_local_crates(checkout: &LocalDependencyCheckout) -> String {
+    checkout
+        .crates
+        .iter()
+        .map(|local_crate| local_crate.relative_path)
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 fn dev() -> Result<()> {
@@ -2427,6 +2601,93 @@ mod tests {
             assert!(error.contains(expected));
             assert!(error.contains("ssh://"));
         }
+    }
+
+    fn create_local_libneo_checkout(root: &Path) -> PathBuf {
+        let checkout = root.join("local-libneo");
+        for name in ["libneo", "libneo-gpui"] {
+            let crate_path = checkout.join("crates").join(name);
+            fs::create_dir_all(&crate_path).unwrap();
+            fs::write(
+                crate_path.join("Cargo.toml"),
+                format!("[package]\nname = {name:?}\nversion = \"0.0.0\"\n"),
+            )
+            .unwrap();
+        }
+        checkout
+    }
+
+    #[test]
+    fn creates_all_local_dependency_overrides_from_checkout_path() {
+        let fixture = Fixture::valid();
+        create_local_libneo_checkout(&fixture.root);
+        let overrides = configured_local_dependency_overrides(&fixture.root, |name| {
+            (name == LOCAL_LIBNEO_PATH_ENV).then(|| OsString::from("local-libneo"))
+        })
+        .unwrap();
+        assert_eq!(overrides.len(), 2);
+        assert!(overrides[0].contains(".libneo.path="));
+        assert!(overrides[1].contains(".libneo-gpui.path="));
+    }
+
+    #[test]
+    fn rejects_unset_local_checkout_path() {
+        let fixture = Fixture::valid();
+        let error = configured_local_dependency_overrides(&fixture.root, |_| None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "NEO_LOCAL_LIBNEO_PATH is not set; set it to the path of a libneo checkout containing crates/libneo and crates/libneo-gpui"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_local_checkout_path() {
+        let fixture = Fixture::valid();
+        let error = configured_local_dependency_overrides(&fixture.root, |_| {
+            Some(OsString::from("missing-libneo"))
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "NEO_LOCAL_LIBNEO_PATH points to a directory that does not exist: missing-libneo; set NEO_LOCAL_LIBNEO_PATH to the path of a libneo checkout containing crates/libneo and crates/libneo-gpui"
+        );
+    }
+
+    #[test]
+    fn rejects_directory_without_expected_local_crates() {
+        let fixture = Fixture::valid();
+        let error =
+            configured_local_dependency_overrides(&fixture.root, |_| Some(OsString::from(".")))
+                .unwrap_err()
+                .to_string();
+        assert!(error.starts_with(
+            "NEO_LOCAL_LIBNEO_PATH does not contain the expected libneo crate manifest at ./crates/libneo/Cargo.toml:"
+        ));
+        assert!(error.ends_with(
+            "set NEO_LOCAL_LIBNEO_PATH to the path of a libneo checkout containing crates/libneo and crates/libneo-gpui"
+        ));
+    }
+
+    #[test]
+    fn rejects_local_manifest_with_wrong_package_name() {
+        let fixture = Fixture::valid();
+        let checkout = create_local_libneo_checkout(&fixture.root);
+        fs::write(
+            checkout.join("crates/libneo/Cargo.toml"),
+            "[package]\nname = \"other\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        let error = configured_local_dependency_overrides(&fixture.root, |_| {
+            Some(OsString::from("local-libneo"))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("package name Some(\"other\")"));
+        assert!(error.contains("expected \"libneo\""));
+        assert!(error.contains(LOCAL_LIBNEO_PATH_ENV));
     }
 
     #[test]
