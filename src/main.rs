@@ -6,8 +6,8 @@ use libneo::window::{
 };
 use neo::theme::{Theme, ThemeMode};
 
-const WINDOW_SIZE: (f32, f32) = (1280.0, 800.0);
-const MINIMUM_SIZE: (f32, f32) = (900.0, 600.0);
+const WINDOW_SIZE: (f32, f32) = (1024.0, 768.0);
+const MINIMUM_SIZE: (f32, f32) = (800.0, 600.0);
 const WINDOW_CONTROLS_POSITION: (f32, f32) = (14.0, 14.0);
 const WINDOW_CORNER_RADIUS: f32 = 16.0;
 const CONTENT_BACKGROUND_ALPHA: f32 = 0.18;
