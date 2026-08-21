@@ -15,13 +15,13 @@ Install `cargo-packager` 0.11.8 and `cargo-about` 0.8.2, then run the release
 stages independently:
 
 ```sh
-cargo xtask package
+cargo xtask bundle
 cargo xtask sign
 cargo xtask notarize
 ```
 
-Packaging uses the release profile by default. For a faster local debug package,
-run `cargo xtask package --debug`.
+Bundling uses the release profile by default. For a faster local debug bundle,
+run `cargo xtask bundle --debug`.
 
 Signing uses the installed Developer ID Application identity or the
 `NEO_SIGNING_IDENTITY` override. Set `NEO_SIGNING_TEAM_IDENTIFIER` to the

@@ -16,7 +16,8 @@ use libneo::toolbar::{
 };
 use libneo::window::{
     Context, IntoElement, ParentElement, Render, Rgba, Styled, VisualEffectMaterial, Window,
-    WindowBackground, WindowBackgroundAppearance, WindowBuilder, WindowChrome, div, px, rgba, run,
+    WindowBackground, WindowBackgroundAppearance, WindowBuilder, WindowChrome, WindowCornerRadius,
+    div, px, rgba, run,
 };
 use neo::theme::{Theme, ThemeAppearance, ThemeMode, ThemeTokens};
 
@@ -445,6 +446,7 @@ fn main() {
         WINDOW_SIZE,
         MINIMUM_SIZE,
         WINDOW_CONTROLS_POSITION,
+        WindowCornerRadius::System,
         configuration.chrome.chrome(configuration.toolbar),
         configuration.surface.background(),
         configuration.background_appearance,

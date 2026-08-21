@@ -2824,7 +2824,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libneo"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/superneoai/libneo.git?rev=40c8ef17ae1d204ae0eb7ad6498c113df224ea9a#40c8ef17ae1d204ae0eb7ad6498c113df224ea9a"
+source = "git+https://github.com/superneoai/libneo.git?rev=904fb40fa2ff249af49a8f90734fa672b3797746#904fb40fa2ff249af49a8f90734fa672b3797746"
 dependencies = [
  "libneo-gpui",
 ]
@@ -2832,13 +2832,16 @@ dependencies = [
 [[package]]
 name = "libneo-gpui"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/superneoai/libneo.git?rev=40c8ef17ae1d204ae0eb7ad6498c113df224ea9a#40c8ef17ae1d204ae0eb7ad6498c113df224ea9a"
+source = "git+https://github.com/superneoai/libneo.git?rev=904fb40fa2ff249af49a8f90734fa672b3797746#904fb40fa2ff249af49a8f90734fa672b3797746"
 dependencies = [
+ "anyhow",
+ "block2 0.6.2",
  "gpui",
  "gpui_platform",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "raw-window-handle",
 ]
 
@@ -3407,9 +3410,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]

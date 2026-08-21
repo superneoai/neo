@@ -26,9 +26,10 @@ const EXPECTED_METAL_TOOL_PREFIX: &str = "/private/var/run/com.apple.security.cr
 const EXPECTED_METAL_TOOL_SUFFIX: &str =
     "/Metal.xctoolchain/usr/metal/32023/bin/metallib shaders.air -o shaders.metallib";
 const LIBNEO_HTTPS_SOURCE: &str = "https://github.com/superneoai/libneo.git";
-const LOCAL_LIBNEO_PATCH: &str =
-    "patch.\"https://github.com/superneoai/libneo.git\".libneo.path=\"../libneo/crates/libneo\"";
-const LOCAL_LIBNEO_GPUI_PATCH: &str = "patch.\"https://github.com/superneoai/libneo.git\".libneo-gpui.path=\"../libneo/crates/libneo-gpui\"";
+const LOCAL_DEPENDENCY_OVERRIDES: &[&str] = &[
+    "patch.\"https://github.com/superneoai/libneo.git\".libneo.path=\"../libneo/crates/libneo\"",
+    "patch.\"https://github.com/superneoai/libneo.git\".libneo-gpui.path=\"../libneo/crates/libneo-gpui\"",
+];
 const MINIMUM_SDK_MAJOR: u32 = 26;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -50,19 +51,18 @@ fn run() -> Result<()> {
     match arguments.as_slice() {
         [command] if command == "check-source" => verify_pinned_source(&repository_root()),
         [command] if command == "check-sdk" => verify_sdk(),
-        [command] if command == "package" => package(PackageProfile::Release),
-        [command, option] if command == "package" && option == "--debug" => {
-            package(PackageProfile::Debug)
+        [command] if command == "bundle" => bundle(BundleProfile::Release),
+        [command, option] if command == "bundle" && option == "--debug" => {
+            bundle(BundleProfile::Debug)
         }
+        [command] if command == "dev" => dev(),
         [command] if command == "sign" => sign(),
         [command] if command == "notarize" => notarize(),
-        [command, cargo_arguments @ ..]
-            if command == "local-cargo" && !cargo_arguments.is_empty() =>
-        {
+        [command, cargo_arguments @ ..] if command == "local" && !cargo_arguments.is_empty() => {
             local_cargo(cargo_arguments)
         }
         _ => Err(failure(
-            "usage: cargo xtask <check-source|check-sdk|package [--debug]|sign|notarize|local-cargo <arguments...>>",
+            "usage: cargo xtask <check-source|check-sdk|bundle [--debug]|dev|sign|notarize|local <arguments...>>",
         )),
     }
 }
@@ -76,13 +76,12 @@ fn local_cargo(arguments: &[OsString]) -> Result<()> {
             format!("cannot read {}: {error}", lockfile_path.display()),
         )
     })?;
-    let result = run_command(
-        Command::new("cargo")
-            .current_dir(&root)
-            .args(["--config", LOCAL_LIBNEO_PATCH])
-            .args(["--config", LOCAL_LIBNEO_GPUI_PATCH])
-            .args(arguments),
-    );
+    let mut command = Command::new("cargo");
+    command.current_dir(&root);
+    for dependency_override in LOCAL_DEPENDENCY_OVERRIDES {
+        command.args(["--config", dependency_override]);
+    }
+    let result = run_command(command.args(arguments));
     fs::write(&lockfile_path, lockfile).map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -90,6 +89,27 @@ fn local_cargo(arguments: &[OsString]) -> Result<()> {
         )
     })?;
     result
+}
+
+fn dev() -> Result<()> {
+    let arguments = ["build", "--release", "--quiet"].map(OsString::from);
+    local_cargo(&arguments)?;
+
+    let root = repository_root();
+    let app = root.join(APP);
+    let executable = app.join("Contents/MacOS/neo");
+    fs::copy(root.join("target/release/neo"), &executable).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot replace {}: {error}", executable.display()),
+        )
+    })?;
+    run_command(
+        Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&app),
+    )?;
+    run_command(Command::new("open").arg(&app))
 }
 
 fn verify_pinned_source(root: &Path) -> Result<()> {
@@ -171,12 +191,12 @@ fn parse_sdk_major(output: &[u8]) -> Result<u32> {
 }
 
 #[derive(Clone, Copy)]
-enum PackageProfile {
+enum BundleProfile {
     Release,
     Debug,
 }
 
-impl PackageProfile {
+impl BundleProfile {
     fn apply(self, command: &mut Command) {
         if matches!(self, Self::Release) {
             command.arg("--release");
@@ -818,12 +838,12 @@ fn ensure_symlink(target: &Path, alias: &Path) -> Result<()> {
     Ok(())
 }
 
-fn package(profile: PackageProfile) -> Result<()> {
+fn bundle(profile: BundleProfile) -> Result<()> {
     let root = repository_root();
     std::env::set_current_dir(&root)?;
     let build_environment = match profile {
-        PackageProfile::Release => Some(ReleaseBuildEnvironment::new(&root)?),
-        PackageProfile::Debug => None,
+        BundleProfile::Release => Some(ReleaseBuildEnvironment::new(&root)?),
+        BundleProfile::Debug => None,
     };
     reject_packager_signing_identity(&root)?;
     require_tool_version("packager", PACKAGER_VERSION)?;
@@ -1911,14 +1931,14 @@ fn verify_bundled_executable(
         io::Error::new(
             error.kind(),
             format!(
-                "missing release artifact: {}: {error}; run `cargo xtask package` first",
+                "missing release artifact: {}: {error}; run `cargo xtask bundle` first",
                 release_executable.display()
             ),
         )
     })?;
     if !release_metadata.is_file() || release_metadata.len() == 0 {
         return Err(failure(format!(
-            "release artifact is not a non-empty regular file: {}; run `cargo xtask package` first",
+            "release artifact is not a non-empty regular file: {}; run `cargo xtask bundle` first",
             release_executable.display()
         )));
     }
@@ -1933,7 +1953,7 @@ fn verify_bundled_executable(
     })?;
     let release_identity = macho_identity(&release_bytes).map_err(|error| {
         failure(format!(
-            "release artifact is not a valid thin 64-bit Mach-O: {}: {error}; run `cargo xtask package` first",
+            "release artifact is not a valid thin 64-bit Mach-O: {}: {error}; run `cargo xtask bundle` first",
             release_executable.display()
         ))
     })?;
@@ -2940,7 +2960,7 @@ mod tests {
         fs::remove_file(fixture.release_executable()).unwrap();
         let error = fixture.verify().unwrap_err().to_string();
         assert!(error.contains("missing release artifact"));
-        assert!(error.contains("run `cargo xtask package` first"));
+        assert!(error.contains("run `cargo xtask bundle` first"));
     }
 
     #[test]
