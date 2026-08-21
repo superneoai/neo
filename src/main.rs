@@ -3,7 +3,7 @@ mod menu;
 use libneo::theme::{Theme, ThemeMode};
 use libneo::window::{
     Context, IntoElement, Render, Styled, VisualEffectMaterial, Window, WindowBackground,
-    WindowBackgroundAppearance, WindowBuilder, WindowChrome, div, run,
+    WindowBackgroundAppearance, WindowBuilder, div, run,
 };
 
 const WINDOW_SIZE: (f32, f32) = (1500.0, 800.0);
@@ -42,8 +42,7 @@ fn main() {
             .background_appearance(WindowBackgroundAppearance::Transparent)
             .background(WindowBackground::VisualEffect(
                 VisualEffectMaterial::UnderWindowBackground,
-            ))
-            .chrome(WindowChrome::Toolbar),
+            )),
         |cx| {
             menu::install(cx);
             Theme::set_mode(ThemeMode::FollowSystem, cx);
