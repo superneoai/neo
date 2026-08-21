@@ -2,15 +2,21 @@ mod menu;
 
 use libneo::theme::{Theme, ThemeMode};
 use libneo::window::{
-    Context, IntoElement, Render, Styled, Window, WindowBackground, WindowBackgroundAppearance,
-    WindowBuilder, WindowChrome, div, run,
+    Context, IntoElement, Render, Styled, VisualEffectMaterial, Window, WindowBackground,
+    WindowBackgroundAppearance, WindowBuilder, WindowChrome, div, run,
 };
+
+const WINDOW_SIZE: (f32, f32) = (1500.0, 800.0);
+const MINIMUM_SIZE: (f32, f32) = (900.0, 600.0);
 
 struct AppRoot;
 
 impl Render for AppRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(Theme::global(cx).tokens().background)
+        let mut background = Theme::global(cx).tokens().background;
+        background.a = 0.18;
+
+        div().size_full().bg(background)
     }
 }
 
@@ -31,10 +37,12 @@ fn main() {
     run_with(
         WindowBuilder::new()
             .title("NEO")
-            .size(1500.0, 800.0)
-            .minimum_size(900.0, 600.0)
-            .background_appearance(WindowBackgroundAppearance::Opaque)
-            .background(WindowBackground::Standard)
+            .size(WINDOW_SIZE.0, WINDOW_SIZE.1)
+            .minimum_size(MINIMUM_SIZE.0, MINIMUM_SIZE.1)
+            .background_appearance(WindowBackgroundAppearance::Transparent)
+            .background(WindowBackground::VisualEffect(
+                VisualEffectMaterial::UnderWindowBackground,
+            ))
             .chrome(WindowChrome::Toolbar),
         |cx| {
             menu::install(cx);
