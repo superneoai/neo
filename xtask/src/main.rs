@@ -22,7 +22,9 @@ const SIGNING_IDENTITY_ENV: &str = "NEO_SIGNING_IDENTITY";
 const EXPECTED_TEAM_IDENTIFIER: &str = "REDACTED_TEAM_IDENTIFIER";
 const NOTARY_PROFILE: &str = "SUPERNEO_NOTARY";
 const NOTARY_ARCHIVE: &str = "dist/NEO.zip";
-const EXPECTED_METAL_TOOL_COMMAND: &str = "/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.s18CDK/Metal.xctoolchain/usr/metal/32023/bin/metallib shaders.air -o shaders.metallib";
+const EXPECTED_METAL_TOOL_PREFIX: &str = "/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.";
+const EXPECTED_METAL_TOOL_SUFFIX: &str =
+    "/Metal.xctoolchain/usr/metal/32023/bin/metallib shaders.air -o shaders.metallib";
 const LIBNEO_HTTPS_SOURCE: &str = "https://github.com/superneoai/libneo.git";
 const MINIMUM_SDK_MAJOR: u32 = 26;
 
@@ -1529,7 +1531,7 @@ fn verify_effective_release_artifact(executable: &Path) -> Result<()> {
         .lines()
         .filter(|line| line.contains("/private/var/run/com.apple.security.cryptexd/"))
         .collect::<Vec<_>>();
-    if metal_commands != [EXPECTED_METAL_TOOL_COMMAND] {
+    if metal_commands.len() != 1 || !is_expected_metal_tool_command(metal_commands[0]) {
         return Err(failure(format!(
             "release artifact has an unexpected Metal toolchain fingerprint: {metal_commands:?}"
         )));
@@ -1538,6 +1540,18 @@ fn verify_effective_release_artifact(executable: &Path) -> Result<()> {
         "verified effective release artifact: OSO entries=0, overflow panic strings=0, remapped paths={remapped_paths}, Metal toolchain fingerprint=expected"
     );
     Ok(())
+}
+
+fn is_expected_metal_tool_command(command: &str) -> bool {
+    command
+        .strip_prefix(EXPECTED_METAL_TOOL_PREFIX)
+        .and_then(|command| command.strip_suffix(EXPECTED_METAL_TOOL_SUFFIX))
+        .is_some_and(|discriminator| {
+            discriminator.len() == 6
+                && discriminator
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric())
+        })
 }
 
 fn verify_deployment_target(executable: &Path, expected: &str) -> Result<()> {
@@ -2389,6 +2403,30 @@ mod tests {
                 .unwrap(),
             "TEAMID1234"
         );
+    }
+
+    #[test]
+    fn accepts_variable_metal_mount_discriminators() {
+        for discriminator in ["s18CDK", "UqzdZ2"] {
+            assert!(is_expected_metal_tool_command(&format!(
+                "{EXPECTED_METAL_TOOL_PREFIX}{discriminator}{EXPECTED_METAL_TOOL_SUFFIX}"
+            )));
+        }
+    }
+
+    #[test]
+    fn rejects_unexpected_metal_tool_fingerprints() {
+        for command in [
+            format!("{EXPECTED_METAL_TOOL_PREFIX}short{EXPECTED_METAL_TOOL_SUFFIX}"),
+            format!("{EXPECTED_METAL_TOOL_PREFIX}bad/ID{EXPECTED_METAL_TOOL_SUFFIX}"),
+            format!(
+                "{}s18CDK{EXPECTED_METAL_TOOL_SUFFIX}",
+                EXPECTED_METAL_TOOL_PREFIX.replace("17.6.109.0", "17.7.0.0")
+            ),
+            format!("{EXPECTED_METAL_TOOL_PREFIX}s18CDK/other/metallib"),
+        ] {
+            assert!(!is_expected_metal_tool_command(&command));
+        }
     }
 
     #[test]
