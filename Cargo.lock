@@ -595,7 +595,7 @@ dependencies = [
 [[package]]
 name = "block"
 version = "0.1.6"
-source = "git+https://github.com/superneoai/libneo.git?rev=c48c332afc244a9bc357b4072f54b593e4ac2be6#c48c332afc244a9bc357b4072f54b593e4ac2be6"
+source = "git+https://github.com/superneoai/libneo.git?rev=8777b3525f796e9a7da050092bd872425646cb01#8777b3525f796e9a7da050092bd872425646cb01"
 
 [[package]]
 name = "block-buffer"
@@ -2823,7 +2823,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libneo"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/superneoai/libneo.git?rev=c48c332afc244a9bc357b4072f54b593e4ac2be6#c48c332afc244a9bc357b4072f54b593e4ac2be6"
+source = "git+https://github.com/superneoai/libneo.git?rev=8777b3525f796e9a7da050092bd872425646cb01#8777b3525f796e9a7da050092bd872425646cb01"
 dependencies = [
  "libneo-gpui",
 ]
@@ -2831,7 +2831,7 @@ dependencies = [
 [[package]]
 name = "libneo-gpui"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/superneoai/libneo.git?rev=c48c332afc244a9bc357b4072f54b593e4ac2be6#c48c332afc244a9bc357b4072f54b593e4ac2be6"
+source = "git+https://github.com/superneoai/libneo.git?rev=8777b3525f796e9a7da050092bd872425646cb01#8777b3525f796e9a7da050092bd872425646cb01"
 dependencies = [
  "gpui",
  "gpui_platform",
@@ -6878,7 +6878,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/superneoai/libneo.git?rev=c48c332afc244a9bc357b4072f54b593e4ac2be6#c48c332afc244a9bc357b4072f54b593e4ac2be6"
+source = "git+https://github.com/superneoai/libneo.git?rev=8777b3525f796e9a7da050092bd872425646cb01#8777b3525f796e9a7da050092bd872425646cb01"
 dependencies = [
  "tracing",
 ]

@@ -13,7 +13,7 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
-libneo = { git = "https://github.com/superneoai/libneo.git", rev = "c48c332afc244a9bc357b4072f54b593e4ac2be6", default-features = false, features = [
+libneo = { git = "https://github.com/superneoai/libneo.git", rev = "8777b3525f796e9a7da050092bd872425646cb01", default-features = false, features = [
   "gpui",
 ] }
 
@@ -22,13 +22,13 @@ libneo = { git = "https://github.com/superneoai/libneo.git", rev = "c48c332afc24
 # Zed tracks the license state in
 # https://github.com/zed-industries/zed/issues/55470.
 [patch."https://github.com/zed-industries/zed"]
-ztracing = { git = "https://github.com/superneoai/libneo.git", rev = "c48c332afc244a9bc357b4072f54b593e4ac2be6" }
+ztracing = { git = "https://github.com/superneoai/libneo.git", rev = "8777b3525f796e9a7da050092bd872425646cb01" }
 
 [patch."https://github.com/zed-industries/font-kit"]
 zed-font-kit = { version = "=0.14.1-zed" }
 
 [patch.crates-io]
-block = { git = "https://github.com/superneoai/libneo.git", rev = "c48c332afc244a9bc357b4072f54b593e4ac2be6" }
+block = { git = "https://github.com/superneoai/libneo.git", rev = "8777b3525f796e9a7da050092bd872425646cb01" }
 
 [package.metadata.packager]
 formats = ["app"]
