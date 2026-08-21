@@ -19,7 +19,7 @@ const BUNDLED_LICENSE: &str = "Contents/Resources/Legal/AGPL-3.0-or-later.txt";
 const APP: &str = "dist/NEO.app";
 const ENTITLEMENTS: &str = "packaging/NEO.entitlements";
 const SIGNING_IDENTITY_ENV: &str = "NEO_SIGNING_IDENTITY";
-const EXPECTED_TEAM_IDENTIFIER: &str = "REDACTED_TEAM_IDENTIFIER";
+const SIGNING_TEAM_IDENTIFIER_ENV: &str = "NEO_SIGNING_TEAM_IDENTIFIER";
 const NOTARY_PROFILE: &str = "SUPERNEO_NOTARY";
 const NOTARY_ARCHIVE: &str = "dist/NEO.zip";
 const EXPECTED_METAL_TOOL_PREFIX: &str = "/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.";
@@ -936,6 +936,7 @@ fn configured_release_executable(root: &Path) -> PathBuf {
 }
 
 fn sign() -> Result<()> {
+    let expected_team_identifier = expected_signing_team_identifier()?;
     let root = repository_root();
     std::env::set_current_dir(&root)?;
     let app = root.join(APP);
@@ -951,11 +952,7 @@ fn sign() -> Result<()> {
     );
     let identity = signing_identity()?;
     let team_identifier = signing_team_identifier(&identity)?;
-    if team_identifier != EXPECTED_TEAM_IDENTIFIER {
-        return Err(failure(format!(
-            "signing identity team {team_identifier} does not match {EXPECTED_TEAM_IDENTIFIER}"
-        )));
-    }
+    verify_signing_team_identifier(&team_identifier, &expected_team_identifier)?;
     let metadata = manifest_metadata(&root)?;
     let entitlements = root.join(ENTITLEMENTS);
     if !entitlements.is_file() {
@@ -1057,6 +1054,42 @@ fn signing_team_identifier(identity: &str) -> Result<String> {
         .filter(|team| !team.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| failure("Developer ID Application identity has no team identifier"))
+}
+
+fn expected_signing_team_identifier() -> Result<String> {
+    configured_signing_team_identifier(std::env::var_os(SIGNING_TEAM_IDENTIFIER_ENV))
+}
+
+fn configured_signing_team_identifier(value: Option<OsString>) -> Result<String> {
+    let value = value.ok_or_else(|| {
+        failure(format!(
+            "{SIGNING_TEAM_IDENTIFIER_ENV} is not set; set it to the 10-character Apple Developer team identifier before signing or notarizing"
+        ))
+    })?;
+    let value = value.into_string().map_err(|_| {
+        failure(format!(
+            "{SIGNING_TEAM_IDENTIFIER_ENV} must contain valid Unicode"
+        ))
+    })?;
+    if value.len() != 10
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Err(failure(format!(
+            "{SIGNING_TEAM_IDENTIFIER_ENV} must be a 10-character uppercase ASCII team identifier"
+        )));
+    }
+    Ok(value)
+}
+
+fn verify_signing_team_identifier(actual: &str, expected: &str) -> Result<()> {
+    if actual != expected {
+        return Err(failure(format!(
+            "signing identity team {actual} does not match {SIGNING_TEAM_IDENTIFIER_ENV}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_signature_details(
@@ -1237,6 +1270,7 @@ fn validate_bundle_signatures(
 }
 
 fn notarize() -> Result<()> {
+    let expected_team_identifier = expected_signing_team_identifier()?;
     let root = repository_root();
     std::env::set_current_dir(&root)?;
     let app = root.join(APP);
@@ -1256,7 +1290,7 @@ fn notarize() -> Result<()> {
             .arg(&app),
     )?;
     let metadata = manifest_metadata(&root)?;
-    validate_bundle_signatures(&app, &metadata, EXPECTED_TEAM_IDENTIFIER)?;
+    validate_bundle_signatures(&app, &metadata, &expected_team_identifier)?;
 
     let archive = root.join(NOTARY_ARCHIVE);
     if archive.exists() {
@@ -2403,6 +2437,40 @@ mod tests {
                 .unwrap(),
             "TEAMID1234"
         );
+    }
+
+    #[test]
+    fn signing_team_configuration_fails_closed_when_unset() {
+        let error = configured_signing_team_identifier(None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(SIGNING_TEAM_IDENTIFIER_ENV));
+        assert!(error.contains("is not set"));
+    }
+
+    #[test]
+    fn rejects_invalid_signing_team_configuration() {
+        for value in ["", "short", "lowercase1", "TEAM-ID123"] {
+            let error = configured_signing_team_identifier(Some(value.into()))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(SIGNING_TEAM_IDENTIFIER_ENV));
+        }
+    }
+
+    #[test]
+    fn signing_team_assertion_rejects_wrong_identifier() {
+        let error = verify_signing_team_identifier("TEAMID1234", "OTHER12345")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not match"));
+        assert!(error.contains(SIGNING_TEAM_IDENTIFIER_ENV));
+    }
+
+    #[test]
+    fn accepts_matching_signing_team_identifier() {
+        let expected = configured_signing_team_identifier(Some("TEAMID1234".into())).unwrap();
+        verify_signing_team_identifier("TEAMID1234", &expected).unwrap();
     }
 
     #[test]

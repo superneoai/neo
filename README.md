@@ -24,8 +24,10 @@ Packaging uses the release profile by default. For a faster local debug package,
 run `cargo xtask package --debug`.
 
 Signing uses the installed Developer ID Application identity or the
-`NEO_SIGNING_IDENTITY` override. Notarization uses the `SUPERNEO_NOTARY`
-Keychain profile.
+`NEO_SIGNING_IDENTITY` override. Set `NEO_SIGNING_TEAM_IDENTIFIER` to the
+10-character Apple Developer team identifier for signing and notarization;
+both operations fail closed when it is missing or does not match the identity.
+Notarization uses the `SUPERNEO_NOTARY` Keychain profile.
 
 ## Contributing and security
 
