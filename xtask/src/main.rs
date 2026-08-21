@@ -23,6 +23,8 @@ const EXPECTED_TEAM_IDENTIFIER: &str = "REDACTED_TEAM_IDENTIFIER";
 const NOTARY_PROFILE: &str = "SUPERNEO_NOTARY";
 const NOTARY_ARCHIVE: &str = "dist/NEO.zip";
 const EXPECTED_METAL_TOOL_COMMAND: &str = "/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.s18CDK/Metal.xctoolchain/usr/metal/32023/bin/metallib shaders.air -o shaders.metallib";
+const LIBNEO_HTTPS_SOURCE: &str = "https://github.com/superneoai/libneo.git";
+const MINIMUM_SDK_MAJOR: u32 = 26;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -46,6 +48,10 @@ fn run() -> Result<()> {
         arguments.next().as_deref(),
         arguments.next(),
     ) {
+        (Some(command), None, None) if command == "check-source" => {
+            verify_pinned_source(&repository_root())
+        }
+        (Some(command), None, None) if command == "check-sdk" => verify_sdk(),
         (Some(command), None, None) if command == "package" => package(PackageProfile::Release),
         (Some(command), Some(option), None) if command == "package" && option == "--debug" => {
             package(PackageProfile::Debug)
@@ -53,9 +59,87 @@ fn run() -> Result<()> {
         (Some(command), None, None) if command == "sign" => sign(),
         (Some(command), None, None) if command == "notarize" => notarize(),
         _ => Err(failure(
-            "usage: cargo xtask <package [--debug]|sign|notarize>",
+            "usage: cargo xtask <check-source|check-sdk|package [--debug]|sign|notarize>",
         )),
     }
+}
+
+fn verify_pinned_source(root: &Path) -> Result<()> {
+    let manifest_path = root.join("Cargo.toml");
+    let lockfile_path = root.join("Cargo.lock");
+    let manifest = fs::read(&manifest_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot read {}: {error}", manifest_path.display()),
+        )
+    })?;
+    let lockfile = fs::read(&lockfile_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot read {}: {error}", lockfile_path.display()),
+        )
+    })?;
+    verify_pinned_source_contents(&manifest, &lockfile)?;
+    println!("verified libneo uses the pinned HTTPS source");
+    Ok(())
+}
+
+fn verify_pinned_source_contents(manifest: &[u8], lockfile: &[u8]) -> Result<()> {
+    if !contains_bytes(manifest, LIBNEO_HTTPS_SOURCE.as_bytes()) {
+        return Err(failure(format!(
+            "Cargo.toml does not contain the required libneo source {LIBNEO_HTTPS_SOURCE}"
+        )));
+    }
+    for (name, contents) in [("Cargo.toml", manifest), ("Cargo.lock", lockfile)] {
+        if contains_bytes(contents, b"ssh://") {
+            return Err(failure(format!(
+                "{name} contains an ssh:// URL; libneo sources must use HTTPS"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_sdk() -> Result<()> {
+    let output = Command::new("xcrun")
+        .arg("--show-sdk-version")
+        .output()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot run xcrun --show-sdk-version: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(failure(format!(
+            "xcrun --show-sdk-version exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let major = parse_sdk_major(&output.stdout)?;
+    if major < MINIMUM_SDK_MAJOR {
+        return Err(failure(format!(
+            "macOS SDK major version {major} is below the required {MINIMUM_SDK_MAJOR}"
+        )));
+    }
+    println!("verified macOS SDK major version {major}");
+    Ok(())
+}
+
+fn parse_sdk_major(output: &[u8]) -> Result<u32> {
+    let version = std::str::from_utf8(output)
+        .map_err(|error| failure(format!("xcrun returned a non-UTF-8 SDK version: {error}")))?
+        .trim();
+    let major = version.split('.').next().unwrap_or_default();
+    if major.is_empty() || !major.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(failure(format!(
+            "xcrun returned an unparseable SDK version {version:?}"
+        )));
+    }
+    major
+        .parse()
+        .map_err(|error| failure(format!("cannot parse SDK major version {major:?}: {error}")))
 }
 
 #[derive(Clone, Copy)]
@@ -2210,6 +2294,58 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn accepts_pinned_https_source() {
+        let manifest = format!("source = {LIBNEO_HTTPS_SOURCE:?}");
+        verify_pinned_source_contents(manifest.as_bytes(), b"lockfile").unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_pinned_https_source() {
+        let error = verify_pinned_source_contents(b"manifest", b"lockfile")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Cargo.toml"));
+        assert!(error.contains(LIBNEO_HTTPS_SOURCE));
+    }
+
+    #[test]
+    fn rejects_ssh_urls_in_source_files() {
+        let manifest = format!("source = {LIBNEO_HTTPS_SOURCE:?}");
+        for (manifest, lockfile, expected) in [
+            (
+                format!("{manifest}\nother = \"ssh://example.invalid/repository\""),
+                "lockfile".to_owned(),
+                "Cargo.toml",
+            ),
+            (
+                manifest.clone(),
+                "source = \"ssh://example.invalid/repository\"".to_owned(),
+                "Cargo.lock",
+            ),
+        ] {
+            let error = verify_pinned_source_contents(manifest.as_bytes(), lockfile.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected));
+            assert!(error.contains("ssh://"));
+        }
+    }
+
+    #[test]
+    fn parses_sdk_major_version() {
+        assert_eq!(parse_sdk_major(b"26.5\n").unwrap(), 26);
+        assert_eq!(parse_sdk_major(b"27\n").unwrap(), 27);
+    }
+
+    #[test]
+    fn rejects_missing_or_unparseable_sdk_version() {
+        for output in [b"".as_slice(), b"not-a-version", b".5", b"25x.1"] {
+            let error = parse_sdk_major(output).unwrap_err().to_string();
+            assert!(error.contains("unparseable SDK version"));
         }
     }
 

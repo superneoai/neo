@@ -26,12 +26,7 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Verify the pinned libneo source
-        run: |
-          grep -F 'https://github.com/superneoai/libneo.git' Cargo.toml
-          if grep -q 'ssh://git@github.com' Cargo.toml Cargo.lock; then
-            echo "NEO must fetch libneo over https" >&2
-            exit 1
-          fi
+        run: cargo xtask check-source
       - name: Build
         run: cargo build --workspace --locked
       - name: Lint
@@ -43,8 +38,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Verify the SDK
-        run: |
-          test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 26
+        run: cargo xtask check-sdk
 
   licenses:
     runs-on: ubuntu-latest
