@@ -2824,7 +2824,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libneo"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/superneoai/libneo.git?rev=58b64f95a82f1c0f4125be33a4a8421bc590d0c2#58b64f95a82f1c0f4125be33a4a8421bc590d0c2"
+source = "git+https://github.com/superneoai/libneo.git?rev=40c8ef17ae1d204ae0eb7ad6498c113df224ea9a#40c8ef17ae1d204ae0eb7ad6498c113df224ea9a"
 dependencies = [
  "libneo-gpui",
 ]
@@ -2832,7 +2832,7 @@ dependencies = [
 [[package]]
 name = "libneo-gpui"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/superneoai/libneo.git?rev=58b64f95a82f1c0f4125be33a4a8421bc590d0c2#58b64f95a82f1c0f4125be33a4a8421bc590d0c2"
+source = "git+https://github.com/superneoai/libneo.git?rev=40c8ef17ae1d204ae0eb7ad6498c113df224ea9a#40c8ef17ae1d204ae0eb7ad6498c113df224ea9a"
 dependencies = [
  "gpui",
  "gpui_platform",
@@ -2840,7 +2840,6 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
- "refineable",
 ]
 
 [[package]]
@@ -3145,6 +3144,7 @@ dependencies = [
 name = "neo"
 version = "0.0.1"
 dependencies = [
+ "gpui",
  "libneo",
 ]
 
